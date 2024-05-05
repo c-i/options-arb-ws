@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -24,7 +26,7 @@ type Greeks struct {
 }
 
 type Market struct {
-	InstrumentId     int     `json:"instrument_id,string"`
+	InstrumentId     int64   `json:"instrument_id,string"`
 	InstrumentName   string  `json:"instrument_name"`
 	InstrumentType   string  `json:"instrument_type"`
 	UnderlyingAsset  string  `json:"underlying_asset"`
@@ -39,12 +41,24 @@ type Market struct {
 	IndexPrice       float64 `json:"index_price,string"`
 	IsActive         bool    `json:"is_active"`
 	OptionType       string  `json:"option_type"`
-	Expiry           int     `json:"expiry,string"`
-	Strike           int     `json:"strike,string"`
+	Expiry           int64   `json:"expiry,string"`
+	Strike           int64   `json:"strike,string"`
 	Greeks           Greeks  `json:"greeks"`
 }
 
-var Orderbooks map[string]interface{} = make(map[string]interface{})
+type Order struct {
+	Price  float64
+	Amount float64
+	Iv     float64
+}
+
+type OrderbookData struct {
+	Bids        []Order
+	Asks        []Order
+	LastUpdated int64
+}
+
+var Orderbooks map[string]*OrderbookData = make(map[string]*OrderbookData) //pointer seems like a bad idea but makes assignment of elements easier
 
 func markets(asset string) []Market {
 	url := AevoHttp + "/markets?asset=" + asset + "&instrument_type=OPTION"
@@ -75,7 +89,9 @@ func markets(asset string) []Market {
 func instruments(markets []Market) []string {
 	var instruments []string
 	for _, market := range markets {
-		instruments = append(instruments, market.InstrumentName)
+		if market.IsActive {
+			instruments = append(instruments, market.InstrumentName)
+		}
 	}
 
 	return instruments
@@ -128,13 +144,6 @@ func wssReqOrderbook(instruments []string, ctx context.Context, c *websocket.Con
 	}
 }
 
-// func unmarshalRes(raw []byte, res *map[string]interface{}) {
-// 	err := json.Unmarshal(raw, &res)
-// 	if err != nil {
-// 		log.Fatalf("Error decoding: %s", err)
-// 	}
-// }
-
 func wssRead(ctx context.Context, c *websocket.Conn) []byte {
 	_, raw, err := c.Read(ctx)
 	if err != nil {
@@ -144,22 +153,87 @@ func wssRead(ctx context.Context, c *websocket.Conn) []byte {
 	return raw
 }
 
-func constructOrderbooks(instruments []string) {
-	for _, instrument := range instruments {
-		Orderbooks[instrument] = make(map[string]interface{})
+func unpackOrders(orders []interface{}) ([]Order, error) {
+	unpackedOrders := make([]Order, 0)
+	for _, order := range orders {
+		orderArr, ok := order.([]interface{})
+
+		if !ok {
+			return unpackedOrders, errors.New("orders not of []interface{} type")
+		}
+		if len(orderArr) != 3 {
+			return unpackedOrders, errors.New("orders not length 3")
+		}
+
+		priceStr, priceOk := orderArr[0].(string)
+		amountStr, amountOk := orderArr[1].(string)
+		ivStr, ivOk := orderArr[2].(string)
+		if !priceOk || !amountOk || !ivOk {
+			return unpackedOrders, errors.New("unable to convert interface{} element to string")
+		}
+
+		price, priceErr := strconv.ParseFloat(priceStr, 64)
+		amount, amountErr := strconv.ParseFloat(amountStr, 64)
+		iv, ivErr := strconv.ParseFloat(ivStr, 64)
+		if priceErr != nil || amountErr != nil || ivErr != nil {
+			log.Printf("%v\n", priceErr)
+			log.Printf("%v\n", amountErr)
+			log.Printf("%v\n", ivErr)
+			return unpackedOrders, errors.New("error converting string to float64")
+		}
+
+		unpackedOrders = append(unpackedOrders, Order{price, amount, iv})
 	}
+
+	return unpackedOrders, nil
 }
 
-// func updateOrderbooks(res map[string]interface{}) {
-// 	key := res["channel"]["orderbook"]
-// 	Orderbooks[key] = res
-// }
+func updateOrderbooks(orderbookRes map[string]interface{}) { //return error as well?
+	_, ok := orderbookRes["data"].(map[string]interface{})
+	var data map[string]interface{}
+	if ok {
+		data = orderbookRes["data"].(map[string]interface{})
+	} else {
+		return
+	}
+
+	instrument, ok := data["instrument_name"].(string)
+	bidsRaw, bidsOk := data["bids"].([]interface{})
+	asksRaw, asksOk := data["asks"].([]interface{})
+	timeStr, timeOk := data["last_updated"].(string)
+	if (!ok || !timeOk) || !(bidsOk || asksOk) {
+		log.Printf("updateOrderbooks: unable to convert field")
+		return
+	}
+
+	bids, bidsErr := unpackOrders(bidsRaw)
+	asks, asksErr := unpackOrders(asksRaw)
+	if bidsErr != nil && asksErr != nil {
+		log.Printf("unpackOrders error: \n%v\n", bidsErr)
+		log.Printf("%v\n", asksErr)
+		return
+	}
+
+	lastUpdated, err := strconv.ParseInt(timeStr, 10, 64)
+	if err != nil {
+		log.Printf("Failed to convert last_updated timestamp to int64: %v\n", err)
+		return
+	}
+
+	Orderbooks[instrument] = &OrderbookData{
+		Bids:        bids,
+		Asks:        asks,
+		LastUpdated: lastUpdated,
+	}
+
+	fmt.Printf("%+v\n\n", Orderbooks[instrument]) //for testing, remove
+}
 
 func main() {
 	markets := markets("ETH")
 	instruments := instruments(markets)
 	fmt.Printf("Number of instruments: %v\n\n", len(instruments))
-	constructOrderbooks(instruments)
+	// constructOrderbooks(instruments)
 	// fmt.Printf("%+v", Orderbooks)
 	// fmt.Printf("%v\n", instruments)
 
@@ -177,25 +251,20 @@ func main() {
 	wssReqOrderbook(instruments, ctx, c)
 
 	var orderbookRaw []byte
-	// var orderbookRes map[string]interface{}
+	var orderbookRes map[string]interface{}
 	for {
 		orderbookRaw = wssRead(ctx, c)
-		// go unmarshalRes(orderbookRaw, &orderbookRes)
-		go fmt.Printf("Decoded JSON response:\n %+v\n", string(orderbookRaw))
-		// go fmt.Printf("%+v\n", reflect.TypeOf(orderbookRes["channel"]["orderbook"]))
+		_ = json.Unmarshal(orderbookRaw, &orderbookRes)
+		updateOrderbooks(orderbookRes)
 	}
 }
 
-// _, r, err := c.Reader(ctx)
-// if err != nil {
-// 	log.Fatal(err)
-// }
-// fmt.Printf("%+v\n\n", r)
+/*
+	websocket loops (independent threads/goroutines):
+	-index price
+	-orderbooks feed per exchange
 
-// var orderbookRes map[string]interface{}
-// decoder := json.NewDecoder(r)
-// err = decoder.Decode(&orderbookRes)
-// if err != nil {
-// 	log.Fatalf("Error decoding: %s", err)
-// }
-// fmt.Printf("Decoded JSON response:\n %+v\n", orderbookRes)
+	calculation goroutine: arbEngine: calculate put call parity opportunities and update table
+
+	UI goroutine: update htmx frontend
+*/
