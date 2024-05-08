@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -15,6 +17,11 @@ import (
 
 const AevoHttp string = "https://api.aevo.xyz"
 const AevoWss string = "wss://ws.aevo.xyz"
+
+type wssData struct {
+	Op   string   `json:"op"`
+	Data []string `json:"data"`
+}
 
 type Greeks struct {
 	Delta float64 `json:"delta,string"`
@@ -58,7 +65,19 @@ type OrderbookData struct {
 	LastUpdated int64
 }
 
+type ArbTable struct {
+	Bid       Order
+	Ask       Order
+	BidType   string
+	AskType   string
+	AbsProfit float64
+	RelProfit float64
+	Apy       float64
+}
+
 var Orderbooks map[string]*OrderbookData = make(map[string]*OrderbookData) //pointer seems like a bad idea but makes assignment of elements easier
+var ArbTables map[string]*ArbTable = make(map[string]*ArbTable)
+var Index map[string]float64 = make(map[string]float64)
 
 func markets(asset string) []Market {
 	url := AevoHttp + "/markets?asset=" + asset + "&instrument_type=OPTION"
@@ -103,14 +122,28 @@ func orderbookJson(instruments []string) []byte {
 		orderbooks = append(orderbooks, "orderbook:"+instrument)
 	}
 
-	type wssData struct {
-		Op   string   `json:"op"`
-		Data []string `json:"data"`
+	data := wssData{
+		Op:   "subscribe",
+		Data: orderbooks,
+	}
+
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		log.Fatalf("orderbook json marshal error: %v", err)
+	}
+
+	return jsonData
+}
+
+func indexJson(assets []string) []byte {
+	var indices []string
+	for _, asset := range assets {
+		indices = append(indices, "index:"+asset)
 	}
 
 	data := wssData{
 		Op:   "subscribe",
-		Data: orderbooks,
+		Data: indices,
 	}
 
 	jsonData, err := json.Marshal(data)
@@ -130,10 +163,10 @@ func wssReqOrderbook(instruments []string, ctx context.Context, c *websocket.Con
 			data = orderbookJson(instruments[i:])
 		}
 
-		fmt.Printf("%v\n\n", string(data))
+		fmt.Printf("subscribe: %v\n\n", string(data))
 		err := c.Write(ctx, 1, data)
 		if err != nil {
-			log.Fatalf("Write error: %v", err)
+			log.Fatalf("Write error: %v\n", err)
 		}
 
 		if i+20 > len(instruments) {
@@ -144,13 +177,14 @@ func wssReqOrderbook(instruments []string, ctx context.Context, c *websocket.Con
 	}
 }
 
-func wssRead(ctx context.Context, c *websocket.Conn) []byte {
-	_, raw, err := c.Read(ctx)
-	if err != nil {
-		log.Fatalf("Read error: %v", err)
-	}
+func wssReqIndex(assets []string, ctx context.Context, c *websocket.Conn) {
+	data := indexJson(assets)
+	fmt.Printf("subscribe: %v\n\n", string(data))
 
-	return raw
+	err := c.Write(ctx, 1, data)
+	if err != nil {
+		log.Fatalf("Write error: %v\n", err)
+	}
 }
 
 func unpackOrders(orders []interface{}) ([]Order, error) {
@@ -188,12 +222,10 @@ func unpackOrders(orders []interface{}) ([]Order, error) {
 	return unpackedOrders, nil
 }
 
-func updateOrderbooks(orderbookRes map[string]interface{}) { //return error as well?
-	_, ok := orderbookRes["data"].(map[string]interface{})
-	var data map[string]interface{}
-	if ok {
-		data = orderbookRes["data"].(map[string]interface{})
-	} else {
+func updateOrderbooks(res map[string]interface{}) {
+	data, ok := res["data"].(map[string]interface{})
+	if !ok {
+		log.Printf("updateOrderbooks: unable to cast response to type map[string]interface{}\n")
 		return
 	}
 
@@ -226,14 +258,96 @@ func updateOrderbooks(orderbookRes map[string]interface{}) { //return error as w
 		LastUpdated: lastUpdated,
 	}
 
-	fmt.Printf("%+v\n\n", Orderbooks[instrument]) //for testing, remove
+	fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
+}
+
+func updateIndex(res map[string]interface{}) {
+	channel, ok := res["channel"].(string)
+	if !ok {
+		log.Printf("updateIndex: unable to convert response 'channel' to string\n\n")
+		return
+	}
+
+	data, ok := res["data"].(map[string]interface{})
+	if !ok {
+		log.Printf("updateIndex: unable to cast response to type map[string]interface{}\n\n")
+		return
+	}
+
+	asset := strings.TrimPrefix(channel, "index:")
+	// fmt.Printf("asset: %v\n\n", asset)
+
+	priceStr, ok := data["price"].(string)
+	if !ok {
+		log.Printf("updateIndex: unable to cast field to type string: %v\n\n", reflect.TypeOf(priceStr))
+		return
+	}
+
+	price, err := strconv.ParseFloat(priceStr, 64)
+	if err != nil {
+		log.Printf("updateIndex: error converting string to float64: %v\n\n", err)
+		return
+	}
+
+	Index[asset] = price
+	fmt.Printf("index: %+v\n\n", Index)
+// }
+
+// func updateArbTables() {
+// 	for key, value := range Orderbooks {
+// 		components := strings.Split(key, "-")
+// 		expiry := components[1]
+// 		strike := components[2]
+// 		optionType := components[3]
+// 		// for key2, value2 := range Orderbooks{
+
+// 		// }
+// 	}
+// }
+
+func wssRead(ctx context.Context, c *websocket.Conn) []byte {
+	_, raw, err := c.Read(ctx)
+	if err != nil {
+		log.Fatalf("Read error: %v", err)
+	}
+
+	return raw //return error as well?
+}
+
+func wssReadLoop(ctx context.Context, c *websocket.Conn) { //add exit condition, add ping or use Reader instead of Read to automatically manage ping, disconnect, etc
+	var raw []byte
+	var res map[string]interface{}
+	for {
+		raw = wssRead(ctx, c)
+		err := json.Unmarshal(raw, &res)
+		if err != nil {
+			log.Printf("readLoop: error unmarshaling orderbookRaw: %v\n\n", err)
+			continue
+		}
+
+		channel, ok := res["channel"].(string)
+		if !ok {
+			log.Printf("readLoop: unable to convert response 'channel' to string\n\n")
+			continue
+		}
+
+		if strings.Contains(channel, "orderbook") {
+			updateOrderbooks(res)
+		}
+
+		if strings.Contains(channel, "index") {
+			// fmt.Printf("index: %v\n\n", string(raw))
+			updateIndex(res)
+		}
+
+	}
 }
 
 func main() {
+	assets := []string{"ETH"}
 	markets := markets("ETH")
 	instruments := instruments(markets)
 	fmt.Printf("Number of instruments: %v\n\n", len(instruments))
-	// constructOrderbooks(instruments)
 	// fmt.Printf("%+v", Orderbooks)
 	// fmt.Printf("%v\n", instruments)
 
@@ -249,20 +363,12 @@ func main() {
 	defer c.CloseNow()
 
 	wssReqOrderbook(instruments, ctx, c)
-
-	var orderbookRaw []byte
-	var orderbookRes map[string]interface{}
-	for {
-		orderbookRaw = wssRead(ctx, c)
-		_ = json.Unmarshal(orderbookRaw, &orderbookRes)
-		updateOrderbooks(orderbookRes)
-	}
+	wssReqIndex(assets, ctx, c)
+	wssReadLoop(ctx, c)
 }
 
 /*
-	websocket loops (independent threads/goroutines):
-	-index price
-	-orderbooks feed per exchange
+	websocket read loop goroutine
 
 	calculation goroutine: arbEngine: calculate put call parity opportunities and update table
 
