@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -66,8 +67,8 @@ type OrderbookData struct {
 }
 
 type ArbTable struct {
-	Bid       Order
-	Ask       Order
+	Bids      []Order
+	Asks      []Order
 	BidType   string
 	AskType   string
 	AbsProfit float64
@@ -258,7 +259,11 @@ func updateOrderbooks(res map[string]interface{}) {
 		LastUpdated: lastUpdated,
 	}
 
-	fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
+	// fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
+	if strings.Contains(instrument, "-C") {
+		instrumentTrim, _ := strings.CutSuffix(instrument, "-C")
+		fmt.Printf("%v: %+v\n\n", instrumentTrim, ArbTables[instrumentTrim])
+	}
 }
 
 func updateIndex(res map[string]interface{}) {
@@ -291,19 +296,82 @@ func updateIndex(res map[string]interface{}) {
 
 	Index[asset] = price
 	fmt.Printf("index: %+v\n\n", Index)
-// }
+}
 
-// func updateArbTables() {
-// 	for key, value := range Orderbooks {
-// 		components := strings.Split(key, "-")
-// 		expiry := components[1]
-// 		strike := components[2]
-// 		optionType := components[3]
-// 		// for key2, value2 := range Orderbooks{
+func updateArbTables() {
+	index := Index["ETH"]
 
-// 		// }
-// 	}
-// }
+	for key, orderbook := range Orderbooks {
+		components := strings.Split(key, "-")
+		strike, err := strconv.ParseFloat(components[2], 64)
+		if err != nil {
+			fmt.Printf("updateArbTables: unable to convert strike string to float64: %v\n", err)
+			continue
+		}
+		optionType := components[3]
+
+		var keyTrim string
+		var key2 string
+		if optionType == "C" {
+			var found bool
+			keyTrim, found = strings.CutSuffix(key, "-C")
+			if !found {
+				continue
+			}
+			key2 = keyTrim + "-P"
+		} else {
+			continue
+		}
+
+		orderbook2, exists := Orderbooks[key2]
+		if !exists {
+			continue
+		}
+		//  abs((index + put) - (strike + call))
+		// %of (index + put + call) ?? subtract the bid since youre selling for the premium?
+		var absProfit float64
+		var callBid float64
+		var putAsk float64
+		if len(orderbook.Bids) > 0 && len(orderbook2.Asks) > 0 {
+			callBid = orderbook.Bids[0].Price
+			putAsk = orderbook2.Asks[0].Price
+			absProfit = math.Abs((index + putAsk) - (strike + callBid))
+			relProfit := absProfit / (index + putAsk + callBid) * 100
+
+			ArbTables[keyTrim] = &ArbTable{
+				Bids:      orderbook.Bids,
+				Asks:      orderbook2.Asks,
+				BidType:   "C",
+				AskType:   "P",
+				AbsProfit: absProfit,
+				RelProfit: relProfit,
+				Apy:       0.0, //implement later, use time.Parse
+			}
+		}
+
+		var callAsk float64
+		var putBid float64
+		if len(orderbook.Asks) > 0 && len(orderbook2.Bids) > 0 {
+			callAsk = orderbook.Asks[0].Price
+			putBid = orderbook2.Bids[0].Price
+			thisProfit := math.Abs((index + putBid) - (strike + callAsk))
+			relProfit := thisProfit / (index + callAsk + putBid) * 100
+
+			if thisProfit > absProfit {
+				ArbTables[keyTrim] = &ArbTable{
+					Bids:      orderbook2.Bids,
+					Asks:      orderbook.Asks,
+					BidType:   "P",
+					AskType:   "C",
+					AbsProfit: thisProfit,
+					RelProfit: relProfit,
+					Apy:       0.0, //implement later, use time.Parse
+				}
+			}
+		}
+
+	}
+}
 
 func wssRead(ctx context.Context, c *websocket.Conn) []byte {
 	_, raw, err := c.Read(ctx)
@@ -338,6 +406,7 @@ func wssReadLoop(ctx context.Context, c *websocket.Conn) { //add exit condition,
 		if strings.Contains(channel, "index") {
 			// fmt.Printf("index: %v\n\n", string(raw))
 			updateIndex(res)
+			updateArbTables()
 		}
 
 	}
