@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -260,10 +261,10 @@ func updateOrderbooks(res map[string]interface{}) {
 	}
 
 	// fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
-	if strings.Contains(instrument, "-C") {
-		instrumentTrim, _ := strings.CutSuffix(instrument, "-C")
-		fmt.Printf("%v: %+v\n\n", instrumentTrim, ArbTables[instrumentTrim])
-	}
+	// if strings.Contains(instrument, "-C") {
+	// 	instrumentTrim, _ := strings.CutSuffix(instrument, "-C")
+	// 	fmt.Printf("%v: %+v\n\n", instrumentTrim, ArbTables[instrumentTrim])
+	// }
 }
 
 func updateIndex(res map[string]interface{}) {
@@ -385,8 +386,11 @@ func wssRead(ctx context.Context, c *websocket.Conn) []byte {
 func wssReadLoop(ctx context.Context, c *websocket.Conn) { //add exit condition, add ping or use Reader instead of Read to automatically manage ping, disconnect, etc
 	var raw []byte
 	var res map[string]interface{}
+	// longest, _ := time.ParseDuration("0s")
 	for {
 		raw = wssRead(ctx, c)
+
+		// start := time.Now()
 		err := json.Unmarshal(raw, &res)
 		if err != nil {
 			log.Printf("readLoop: error unmarshaling orderbookRaw: %v\n\n", err)
@@ -404,15 +408,19 @@ func wssReadLoop(ctx context.Context, c *websocket.Conn) { //add exit condition,
 		}
 
 		if strings.Contains(channel, "index") {
-			// fmt.Printf("index: %v\n\n", string(raw))
 			updateIndex(res)
 			updateArbTables()
 		}
 
+		// duration := time.Since(start)
+		// if duration > longest {
+		// 	longest = duration
+		// }
+		// fmt.Printf("longest loop time: %v\n\n", longest)
 	}
 }
 
-func main() {
+func aevoWss() {
 	assets := []string{"ETH"}
 	markets := markets("ETH")
 	instruments := instruments(markets)
@@ -434,6 +442,37 @@ func main() {
 	wssReqOrderbook(instruments, ctx, c)
 	wssReqIndex(assets, ctx, c)
 	wssReadLoop(ctx, c)
+}
+
+func serveHome(w http.ResponseWriter, r *http.Request) {
+	tmpl := template.Must(template.ParseFiles("templates/index.html"))
+	tmpl.Execute(w, nil)
+}
+
+func arbTableHandler(w http.ResponseWriter, r *http.Request) {
+	responseStr := ""
+	for key, value := range ArbTables {
+		responseStr += fmt.Sprintf(`<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+			key,
+			value.BidType,
+			strconv.FormatFloat(value.Bids[0].Amount, 'f', 3, 64),
+			value.AskType,
+			strconv.FormatFloat(value.Asks[0].Amount, 'f', 3, 64),
+			strconv.FormatFloat(value.AbsProfit, 'f', 3, 64),
+			strconv.FormatFloat(value.RelProfit, 'f', 3, 64),
+			strconv.FormatFloat(value.Apy, 'f', 3, 64),
+		)
+	}
+
+	fmt.Fprint(w, responseStr)
+}
+
+func main() {
+	go aevoWss()
+
+	http.HandleFunc("/", serveHome)
+	http.HandleFunc("/update-table", arbTableHandler)
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 /*
