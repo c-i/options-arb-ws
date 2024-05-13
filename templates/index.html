@@ -8,12 +8,27 @@
     <link rel="stylesheet" href="styles.css">
     <script src="https://unpkg.com/htmx.org@1.9.12"></script> 
     <!-- should probably download htmx to use locally -->
+
+    <style>
+        table {
+            border: 1px solid rgb(0, 0, 0);
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            border: 1px solid rgb(0, 0, 0);
+            text-align: center;
+            padding: 4px;
+        }
+    </style>
 </head>
 <body>
     <table id="arbTable">
         <thead>
             <tr>
-                <th scope="col" rowspan="2">Strike-Expiry</th>
+                <th scope="col" rowspan="2">Expiry</th>
+                <th scope="col" rowspan="2">Strike</th>
                 <th scope="col" colspan="2">Bids</th>
                 <th scope="col" colspan="2">Asks</th>
                 <th scope="col" rowspan="2">Profit</th>
