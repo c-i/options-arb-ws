@@ -235,12 +235,16 @@ func updateOrderbooks(res map[string]interface{}) {
 		return
 	}
 
+	if len(data) <= 3 { //check for ping response, not very robust and inappropriate to catch here, might need to fix later
+		return
+	}
+
 	instrument, ok := data["instrument_name"].(string)
 	bidsRaw, bidsOk := data["bids"].([]interface{})
 	asksRaw, asksOk := data["asks"].([]interface{})
 	timeStr, timeOk := data["last_updated"].(string)
 	if (!ok || !timeOk) || !(bidsOk || asksOk) {
-		log.Printf("updateOrderbooks: unable to convert field")
+		log.Printf("updateOrderbooks: unable to convert field: response: %v", res)
 		return
 	}
 
@@ -300,7 +304,7 @@ func updateIndex(res map[string]interface{}) {
 	}
 
 	Index[asset] = price
-	fmt.Printf("index: %+v\n\n", Index)
+	// fmt.Printf("index: %+v\n\n", Index)
 }
 
 func findApy(expiry string, relProfit float64) float64 {
@@ -419,6 +423,7 @@ func wssReadLoop(ctx context.Context, c *websocket.Conn) { //add exit condition,
 
 		// start := time.Now()
 		err := json.Unmarshal(raw, &res)
+		// fmt.Printf("%+v\n\n", reflect.TypeOf(res["data"]))
 		if err != nil {
 			log.Printf("readLoop: error unmarshaling orderbookRaw: %v\n\n", err)
 			continue
@@ -447,6 +452,29 @@ func wssReadLoop(ctx context.Context, c *websocket.Conn) { //add exit condition,
 	}
 }
 
+func wssPingLoop(ctx context.Context, c *websocket.Conn) {
+	data := struct {
+		Id int    `json:"id"`
+		Op string `json:"op"`
+	}{
+		1,
+		"ping",
+	}
+
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("wssPingLoop: json marshal error: %v", err)
+	}
+
+	for {
+		err = c.Write(ctx, 1, jsonData)
+		if err != nil {
+			log.Printf("wssPingLoop: write error: %v\n", err)
+		}
+		time.Sleep(time.Second)
+	}
+}
+
 func aevoWss() {
 	assets := []string{"ETH"}
 	markets := markets("ETH")
@@ -468,6 +496,7 @@ func aevoWss() {
 
 	wssReqOrderbook(instruments, ctx, c)
 	wssReqIndex(assets, ctx, c)
+	go wssPingLoop(ctx, c)
 	wssReadLoop(ctx, c)
 }
 
@@ -504,11 +533,21 @@ func arbTableHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, responseStr)
 }
 
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	responseStr := ""
+	for key, value := range Index {
+		responseStr += fmt.Sprintf(`<h3>%s: %s</h3>`, key, strconv.FormatFloat(value, 'f', 3, 64))
+	}
+	fmt.Fprint(w, responseStr)
+}
+
 func main() {
 	go aevoWss()
 
 	http.HandleFunc("/", serveHome)
 	http.HandleFunc("/update-table", arbTableHandler)
+	http.HandleFunc("/update-index", indexHandler)
+	fmt.Println("Server starting on http://localhost:8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
