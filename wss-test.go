@@ -169,7 +169,7 @@ func wssReqOrderbook(instruments []string, ctx context.Context, c *websocket.Con
 			data = orderbookJson(instruments[i:])
 		}
 
-		fmt.Printf("subscribe: %v\n\n", string(data))
+		// fmt.Printf("subscribe: %v\n\n", string(data))
 		err := c.Write(ctx, 1, data)
 		if err != nil {
 			log.Fatalf("Write error: %v\n", err)
@@ -278,7 +278,7 @@ func updateOrderbooks(res map[string]interface{}) {
 func updateIndex(res map[string]interface{}) {
 	channel, ok := res["channel"].(string)
 	if !ok {
-		log.Printf("updateIndex: unable to convert response 'channel' to string\n\n")
+		log.Printf("updateIndex: unable to convert response 'channel' to string: %v\n\n", reflect.TypeOf(res["channel"]))
 		return
 	}
 
@@ -287,13 +287,16 @@ func updateIndex(res map[string]interface{}) {
 		log.Printf("updateIndex: unable to cast response to type map[string]interface{}\n\n")
 		return
 	}
+	if reflect.TypeOf(data["price"]) == nil { //catch ping response, inappropriate to catch here, should fix later
+		return
+	}
 
 	asset := strings.TrimPrefix(channel, "index:")
 	// fmt.Printf("asset: %v\n\n", asset)
 
 	priceStr, ok := data["price"].(string)
 	if !ok {
-		log.Printf("updateIndex: unable to cast field to type string: %v\n\n", reflect.TypeOf(priceStr))
+		log.Printf("updateIndex: unable to cast field to type string: %v\n\n", reflect.TypeOf(data["price"]))
 		return
 	}
 
@@ -316,7 +319,8 @@ func findApy(expiry string, relProfit float64) float64 {
 	timestamp := float64(ts.Unix())
 	now := float64(time.Now().Unix())
 
-	apy := (365 / math.Ceil((1+timestamp-now)/86400)) * relProfit
+	apy := math.Pow(1.0+relProfit, 365/math.Ceil((1+timestamp-now)/86400))
+	// apy := 365/math.Ceil((1+timestamp-now)/86400) * relProfit
 
 	return apy
 }
@@ -363,17 +367,19 @@ func updateArbTables(asset string) {
 			relProfit := absProfit / (index + putAsk + callBid) * 100
 			apy := findApy(expiry, relProfit)
 
-			ArbTables[keyTrim] = &ArbTable{
-				Asset:     asset,
-				Expiry:    expiry,
-				Strike:    strike,
-				Bids:      orderbook.Bids,
-				Asks:      orderbook2.Asks,
-				BidType:   "C",
-				AskType:   "P",
-				AbsProfit: absProfit,
-				RelProfit: relProfit,
-				Apy:       apy,
+			if callBid+strike > putAsk+index {
+				ArbTables[keyTrim] = &ArbTable{
+					Asset:     asset,
+					Expiry:    expiry,
+					Strike:    strike,
+					Bids:      orderbook.Bids,
+					Asks:      orderbook2.Asks,
+					BidType:   "C",
+					AskType:   "P",
+					AbsProfit: absProfit,
+					RelProfit: relProfit,
+					Apy:       apy,
+				}
 			}
 		}
 
@@ -386,7 +392,7 @@ func updateArbTables(asset string) {
 			relProfit := thisProfit / (index + callAsk + putBid) * 100
 			apy := findApy(expiry, relProfit)
 
-			if thisProfit > absProfit {
+			if callAsk+strike < putBid+index && thisProfit > absProfit {
 				ArbTables[keyTrim] = &ArbTable{
 					Asset:     asset,
 					Expiry:    expiry,
@@ -408,7 +414,7 @@ func updateArbTables(asset string) {
 func wssRead(ctx context.Context, c *websocket.Conn) []byte {
 	_, raw, err := c.Read(ctx)
 	if err != nil {
-		log.Fatalf("Read error: %v", err)
+		log.Fatalf("wssRead: read error: %v, response: %v", err, raw)
 	}
 
 	return raw //return error as well?
@@ -423,17 +429,26 @@ func wssReadLoop(ctx context.Context, c *websocket.Conn) { //add exit condition,
 
 		// start := time.Now()
 		err := json.Unmarshal(raw, &res)
-		// fmt.Printf("%+v\n\n", reflect.TypeOf(res["data"]))
 		if err != nil {
 			log.Printf("readLoop: error unmarshaling orderbookRaw: %v\n\n", err)
 			continue
 		}
 
 		channel, ok := res["channel"].(string)
+		// data, dataOk := res["data"].(map[string]interface{})
 		if !ok {
 			log.Printf("readLoop: unable to convert response 'channel' to string\n\n")
 			continue
 		}
+		// if !dataOk {
+		// 	log.Printf("readLoop: unable to convert response 'data' to map[string]interface{}\n\n")
+		// 	continue
+		// }
+
+		// if len(data) <= 3 { //check for ping response, not very robust, might need to fix later
+		// 	fmt.Printf("%+v\n\n", res)
+		// 	continue
+		// }
 
 		if strings.Contains(channel, "orderbook") {
 			updateOrderbooks(res)
@@ -471,7 +486,19 @@ func wssPingLoop(ctx context.Context, c *websocket.Conn) {
 		if err != nil {
 			log.Printf("wssPingLoop: write error: %v\n", err)
 		}
-		time.Sleep(time.Second)
+		log.Printf("Sent ping\n")
+		time.Sleep(time.Minute)
+	}
+}
+
+func wssReqLoop(assets []string, instruments []string, ctx context.Context, c *websocket.Conn) {
+	for {
+		wssReqOrderbook(instruments, ctx, c)
+		log.Printf("Requested Orderbooks")
+		wssReqIndex(assets, ctx, c)
+		log.Printf("Requested Index")
+
+		time.Sleep(time.Minute * 10)
 	}
 }
 
@@ -480,10 +507,8 @@ func aevoWss() {
 	markets := markets("ETH")
 	instruments := instruments(markets)
 	fmt.Printf("Number of instruments: %v\n\n", len(instruments))
-	// fmt.Printf("%+v", Orderbooks)
-	// fmt.Printf("%v\n", instruments)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*20)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	c, res, err := websocket.Dial(ctx, AevoWss, nil)
@@ -494,9 +519,10 @@ func aevoWss() {
 	defer c.Close(websocket.StatusNormalClosure, "")
 	defer c.CloseNow()
 
-	wssReqOrderbook(instruments, ctx, c)
-	wssReqIndex(assets, ctx, c)
-	go wssPingLoop(ctx, c)
+	// wssReqOrderbook(instruments, ctx, c)
+	// wssReqIndex(assets, ctx, c)
+	// go wssPingLoop(ctx, c)
+	go wssReqLoop(assets, instruments, ctx, c)
 	wssReadLoop(ctx, c)
 }
 
@@ -512,7 +538,6 @@ func arbTableHandler(w http.ResponseWriter, r *http.Request) {
 		arbTablesSlice[i] = table
 		i++
 	}
-	// sort.Slice(arbTablesSlice, func(i, j int) bool { return arbTablesSlice[i].RelProfit > arbTablesSlice[j].RelProfit })
 	sort.Slice(arbTablesSlice, func(i, j int) bool { return arbTablesSlice[i].Apy > arbTablesSlice[j].Apy })
 
 	responseStr := ""
@@ -550,11 +575,3 @@ func main() {
 	fmt.Println("Server starting on http://localhost:8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
-
-/*
-	websocket read loop goroutine
-
-	calculation goroutine: arbEngine: calculate put call parity opportunities and update table
-
-	UI goroutine: update htmx frontend
-*/
