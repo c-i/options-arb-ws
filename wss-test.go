@@ -85,6 +85,34 @@ var Orderbooks map[string]*OrderbookData = make(map[string]*OrderbookData) //poi
 var ArbTables map[string]*ArbTable = make(map[string]*ArbTable)
 var Index map[string]float64 = make(map[string]float64)
 
+func lyraMarkets(asset string) map[string]interface{} {
+	url := "https://api.lyra.finance/public/get_instruments"
+
+	payload := strings.NewReader("{\"expired\":false,\"instrument_type\":\"option\",\"currency\":\"ETH\"}")
+
+	req, _ := http.NewRequest("POST", url, payload)
+
+	req.Header.Add("accept", "application/json")
+	req.Header.Add("content-type", "application/json")
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Fatalf("lyraMarkets: request error: %v", err)
+	}
+
+	defer res.Body.Close()
+
+	var markets map[string]interface{}
+
+	decoder := json.NewDecoder(res.Body)
+	err = decoder.Decode(&markets)
+	if err != nil {
+		log.Fatalf("markets json decode error: %v", err)
+	}
+
+	return markets
+}
+
 func markets(asset string) []Market {
 	url := AevoHttp + "/markets?asset=" + asset + "&instrument_type=OPTION"
 
@@ -110,6 +138,10 @@ func markets(asset string) []Market {
 
 	return markets
 }
+
+// func lyraInstruments(markets map[string]interface{}) []string {
+
+// }
 
 func instruments(markets []Market) []string {
 	var instruments []string
@@ -356,7 +388,6 @@ func updateArbTables(asset string) {
 			continue
 		}
 		//  abs((index + put) - (strike + call))
-		// %of (index + put + call) ?? subtract the bid since youre selling for the premium?
 		var absProfit float64
 		var callBid float64
 		var putAsk float64
@@ -414,7 +445,7 @@ func updateArbTables(asset string) {
 func wssRead(ctx context.Context, c *websocket.Conn) []byte {
 	_, raw, err := c.Read(ctx)
 	if err != nil {
-		log.Fatalf("wssRead: read error: %v, response: %v", err, raw)
+		log.Printf("wssRead: read error: %v, response: %v", err, raw)
 	}
 
 	return raw //return error as well?
@@ -491,8 +522,13 @@ func wssPingLoop(ctx context.Context, c *websocket.Conn) {
 	}
 }
 
-func wssReqLoop(assets []string, instruments []string, ctx context.Context, c *websocket.Conn) {
+func wssReqLoop(ctx context.Context, c *websocket.Conn) {
 	for {
+		assets := []string{"ETH"}
+		markets := markets("ETH")
+		instruments := instruments(markets)
+		fmt.Printf("Number of instruments: %v\n\n", len(instruments))
+
 		wssReqOrderbook(instruments, ctx, c)
 		log.Printf("Requested Orderbooks")
 		wssReqIndex(assets, ctx, c)
@@ -503,11 +539,6 @@ func wssReqLoop(assets []string, instruments []string, ctx context.Context, c *w
 }
 
 func aevoWss() {
-	assets := []string{"ETH"}
-	markets := markets("ETH")
-	instruments := instruments(markets)
-	fmt.Printf("Number of instruments: %v\n\n", len(instruments))
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -522,7 +553,7 @@ func aevoWss() {
 	// wssReqOrderbook(instruments, ctx, c)
 	// wssReqIndex(assets, ctx, c)
 	// go wssPingLoop(ctx, c)
-	go wssReqLoop(assets, instruments, ctx, c)
+	go wssReqLoop(ctx, c)
 	wssReadLoop(ctx, c)
 }
 
