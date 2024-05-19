@@ -20,6 +20,8 @@ import (
 
 const AevoHttp string = "https://api.aevo.xyz"
 const AevoWss string = "wss://ws.aevo.xyz"
+const LyraHttp string = "https://api.lyra.finance"
+const LyraWss string = "wss://api.lyra.finance/ws"
 
 type wssData struct {
 	Op   string   `json:"op"`
@@ -86,9 +88,9 @@ var ArbTables map[string]*ArbTable = make(map[string]*ArbTable)
 var Index map[string]float64 = make(map[string]float64)
 
 func lyraMarkets(asset string) map[string]interface{} {
-	url := "https://api.lyra.finance/public/get_instruments"
+	url := LyraHttp + "/public/get_instruments"
 
-	payload := strings.NewReader("{\"expired\":false,\"instrument_type\":\"option\",\"currency\":\"ETH\"}")
+	payload := strings.NewReader(fmt.Sprintf("{\"expired\":false,\"instrument_type\":\"option\",\"currency\":\"%v\"}", asset))
 
 	req, _ := http.NewRequest("POST", url, payload)
 
@@ -139,9 +141,25 @@ func markets(asset string) []Market {
 	return markets
 }
 
-// func lyraInstruments(markets map[string]interface{}) []string {
+func lyraInstruments(markets map[string]interface{}) []string {
+	var instruments []string
+	result, ok := markets["result"].([]interface{})
+	if !ok {
+		log.Printf("lyraInstruments: unable to convert markets['result'] to []interface{}")
+		return instruments
+	}
 
-// }
+	var instrument string
+	var market map[string]interface{}
+	for _, item := range result {
+		market = item.(map[string]interface{})
+		instrument = market["instrument_name"].(string)
+
+		instruments = append(instruments, instrument)
+	}
+
+	return instruments
+}
 
 func instruments(markets []Market) []string {
 	var instruments []string
@@ -152,6 +170,28 @@ func instruments(markets []Market) []string {
 	}
 
 	return instruments
+}
+
+func lyraOrderbookJson() []byte {
+	params := make(map[string][]string)
+	params["channels"] = []string{"orderbook.ETH-20240531-3200-P.1.10"}
+
+	data := struct {
+		Id     string              `json:"id"`
+		Method string              `json:"method"`
+		Params map[string][]string `json:"params"`
+	}{
+		"2",
+		"subscribe",
+		params,
+	}
+
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		log.Fatalf("orderbook json marshal error: %v", err)
+	}
+
+	return jsonData
 }
 
 func orderbookJson(instruments []string) []byte {
@@ -190,6 +230,15 @@ func indexJson(assets []string) []byte {
 	}
 
 	return jsonData
+}
+
+func lyraWssReqOrderbook(ctx context.Context, c *websocket.Conn) {
+	data := lyraOrderbookJson()
+
+	err := c.Write(ctx, 1, data)
+	if err != nil {
+		log.Fatalf("Write error: %v\n", err)
+	}
 }
 
 func wssReqOrderbook(instruments []string, ctx context.Context, c *websocket.Conn) {
@@ -538,6 +587,25 @@ func wssReqLoop(ctx context.Context, c *websocket.Conn) {
 	}
 }
 
+func lyraWss() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c, res, err := websocket.Dial(ctx, LyraWss, nil)
+	if err != nil {
+		log.Fatalf("Dial error: %v", err)
+	}
+	fmt.Printf("%v\n\n", res)
+	defer c.Close(websocket.StatusNormalClosure, "")
+	defer c.CloseNow()
+
+	lyraWssReqOrderbook(ctx, c)
+	for {
+		raw := wssRead(ctx, c)
+		fmt.Printf("%+v\n\n", string(raw))
+	}
+}
+
 func aevoWss() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -598,7 +666,14 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	go aevoWss()
+	markets := lyraMarkets("ETH")
+	instruments := lyraInstruments(markets)
+
+	fmt.Printf("%+v\n\n", instruments)
+
+	lyraWss()
+
+	// go aevoWss()
 
 	http.HandleFunc("/", serveHome)
 	http.HandleFunc("/update-table", arbTableHandler)
