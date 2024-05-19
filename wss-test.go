@@ -67,7 +67,7 @@ type Order struct {
 type OrderbookData struct {
 	Bids        []Order
 	Asks        []Order
-	LastUpdated int64
+	LastUpdated float64
 }
 
 type ArbTable struct {
@@ -85,7 +85,8 @@ type ArbTable struct {
 
 var Orderbooks map[string]*OrderbookData = make(map[string]*OrderbookData) //pointer seems like a bad idea but makes assignment of elements easier
 var ArbTables map[string]*ArbTable = make(map[string]*ArbTable)
-var Index map[string]float64 = make(map[string]float64)
+var AevoIndex map[string]float64 = make(map[string]float64)
+var LyraIndex map[string]float64 = make(map[string]float64)
 
 func lyraMarkets(asset string) map[string]interface{} {
 	url := LyraHttp + "/public/get_instruments"
@@ -175,7 +176,6 @@ func instruments(markets []Market) []string {
 func lyraOrderbookJson(instruments []string) []byte {
 	params := make(map[string][]string)
 	params["channels"] = []string{}
-	// "orderbook.ETH-20240531-3200-P.1.10"
 
 	var param string
 	for _, instrument := range instruments {
@@ -210,6 +210,34 @@ func orderbookJson(instruments []string) []byte {
 	data := wssData{
 		Op:   "subscribe",
 		Data: orderbooks,
+	}
+
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		log.Fatalf("orderbook json marshal error: %v", err)
+	}
+
+	return jsonData
+}
+
+func lyraIndexJson(assets []string) []byte {
+	params := make(map[string][]string)
+	params["channels"] = []string{}
+
+	var param string
+	for _, asset := range assets {
+		param = "spot_feed." + asset
+		params["channels"] = append(params["channels"], param)
+	}
+
+	data := struct {
+		Id     string              `json:"id"`
+		Method string              `json:"method"`
+		Params map[string][]string `json:"params"`
+	}{
+		"2",
+		"subscribe",
+		params,
 	}
 
 	jsonData, err := json.Marshal(data)
@@ -271,6 +299,16 @@ func wssReqOrderbook(instruments []string, ctx context.Context, c *websocket.Con
 	}
 }
 
+func lyraWssReqIndex(assets []string, ctx context.Context, c *websocket.Conn) {
+	data := lyraIndexJson(assets)
+	fmt.Printf("subscribe: %v\n\n", string(data))
+
+	err := c.Write(ctx, 1, data)
+	if err != nil {
+		log.Fatalf("Write error: %v\n", err)
+	}
+}
+
 func wssReqIndex(assets []string, ctx context.Context, c *websocket.Conn) {
 	data := indexJson(assets)
 	fmt.Printf("subscribe: %v\n\n", string(data))
@@ -281,7 +319,7 @@ func wssReqIndex(assets []string, ctx context.Context, c *websocket.Conn) {
 	}
 }
 
-func unpackOrders(orders []interface{}) ([]Order, error) {
+func unpackOrders(orders []interface{}, exchange string) ([]Order, error) {
 	unpackedOrders := make([]Order, 0)
 	for _, order := range orders {
 		orderArr, ok := order.([]interface{})
@@ -289,13 +327,24 @@ func unpackOrders(orders []interface{}) ([]Order, error) {
 		if !ok {
 			return unpackedOrders, errors.New("orders not of []interface{} type")
 		}
-		if len(orderArr) != 3 {
-			return unpackedOrders, errors.New("orders not length 3")
+		if exchange == "aevo" && len(orderArr) != 3 {
+			return unpackedOrders, errors.New("aevo orders not length 3")
+		}
+		if exchange == "lyra" && len(orderArr) != 2 {
+			return unpackedOrders, errors.New("lyra orders not length 2")
 		}
 
 		priceStr, priceOk := orderArr[0].(string)
 		amountStr, amountOk := orderArr[1].(string)
-		ivStr, ivOk := orderArr[2].(string)
+		var ivStr string
+		var ivOk bool
+		if exchange == "aevo" {
+			ivStr, ivOk = orderArr[2].(string)
+		}
+		if exchange == "lyra" {
+			ivStr = "-1"
+			ivOk = true
+		}
 		if !priceOk || !amountOk || !ivOk {
 			return unpackedOrders, errors.New("unable to convert interface{} element to string")
 		}
@@ -316,21 +365,44 @@ func unpackOrders(orders []interface{}) ([]Order, error) {
 	return unpackedOrders, nil
 }
 
-// func lyraUpdateOrderbooks(data map[string]interface{}) {
-// 	instrument, ok := data["instrument_name"].(string)
-// 	bidsRaw, bidsOk := data["bids"].([]interface{})
-// 	asksRaw, asksOk := data["asks"].([]interface{})
-// 	timeStr, timeOk := data["timestamp"].(float64)
-// 	if (!ok || !timeOk) || !(bidsOk || asksOk) {
-// 		log.Printf("lyraUpdateOrderbooks: unable to convert field: response: %+v", data)
-// 		return
-// 	}
+func lyraUpdateOrderbooks(data map[string]interface{}) {
+	lyraInstrument, ok := data["instrument_name"].(string)
+	bidsRaw, bidsOk := data["bids"].([]interface{})
+	asksRaw, asksOk := data["asks"].([]interface{})
+	timestamp, timeOk := data["timestamp"].(float64)
+	if (!ok || !timeOk) || !(bidsOk || asksOk) {
+		log.Printf("lyraUpdateOrderbooks: unable to convert field: response: %+v", data)
+		return
+	}
 
-// 	if len(bidsRaw) <= 0 && len(asksRaw) <= 0 {
-// 		return
-// 	}
+	if len(bidsRaw) <= 0 && len(asksRaw) <= 0 {
+		return
+	}
 
-// }
+	bids, bidsErr := unpackOrders(bidsRaw, "lyra")
+	asks, asksErr := unpackOrders(asksRaw, "lyra")
+	if bidsErr != nil && asksErr != nil {
+		log.Printf("unpackOrders error: \n%v\n", bidsErr)
+		log.Printf("%v\n", asksErr)
+		return
+	}
+
+	instrumentParts := strings.Split(lyraInstrument, "-")
+	expiryTs, err := time.Parse("20060102", instrumentParts[1])
+	if err != nil {
+		log.Printf("lyraUpdateOrderbooks: time.Parse error: %v\n\n", err)
+	}
+	expiry := strings.ToUpper(expiryTs.Format("02Jan06"))
+	instrument := instrumentParts[0] + "-" + expiry + "-" + instrumentParts[2] + "-" + instrumentParts[3]
+
+	Orderbooks[instrument] = &OrderbookData{
+		Bids:        bids,
+		Asks:        asks,
+		LastUpdated: timestamp,
+	}
+
+	// fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
+}
 
 func updateOrderbooks(res map[string]interface{}) {
 	data, ok := res["data"].(map[string]interface{})
@@ -356,15 +428,15 @@ func updateOrderbooks(res map[string]interface{}) {
 		return
 	}
 
-	bids, bidsErr := unpackOrders(bidsRaw)
-	asks, asksErr := unpackOrders(asksRaw)
+	bids, bidsErr := unpackOrders(bidsRaw, "aevo")
+	asks, asksErr := unpackOrders(asksRaw, "aevo")
 	if bidsErr != nil && asksErr != nil {
 		log.Printf("unpackOrders error: \n%v\n", bidsErr)
 		log.Printf("%v\n", asksErr)
 		return
 	}
 
-	lastUpdated, err := strconv.ParseInt(timeStr, 10, 64)
+	lastUpdated, err := strconv.ParseFloat(timeStr, 64)
 	if err != nil {
 		log.Printf("Failed to convert last_updated timestamp to int64: %v\n", err)
 		return
@@ -376,11 +448,35 @@ func updateOrderbooks(res map[string]interface{}) {
 		LastUpdated: lastUpdated,
 	}
 
-	// fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
+	fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
 	// if strings.Contains(instrument, "-C") {
 	// 	instrumentTrim, _ := strings.CutSuffix(instrument, "-C")
 	// 	fmt.Printf("%v: %+v\n\n", instrumentTrim, ArbTables[instrumentTrim])
 	// }
+}
+
+func lyraUpdateIndex(data map[string]interface{}) {
+	feeds, ok := data["feeds"].(map[string]interface{})
+	if !ok {
+		log.Printf("lyraUpdateIndex: unable to convert data['feeds'] to map[string]interface{}: %+v\n\n", data)
+		return
+	}
+
+	var feed map[string]interface{}
+	for key, value := range feeds {
+		feed, ok = value.(map[string]interface{})
+		price, ok2 := feed["price"].(string)
+		if !ok || !ok2 {
+			log.Printf("lyraUpdateIndex: unable to convert value to map[string]interface{} or feed['price'] to float64:\n value, type: %+v, %+v\n feed['price']: %+v, %+v\n\n", value, reflect.TypeOf(value), feed["price"], reflect.TypeOf(feed["price"]))
+			continue
+		}
+
+		var err error
+		LyraIndex[key], err = strconv.ParseFloat(price, 64)
+		if err != nil {
+			log.Printf("lyraUpdateIndex: strconvParseFloat error: %v\n\n", err)
+		}
+	}
 }
 
 func updateIndex(res map[string]interface{}) {
@@ -395,9 +491,9 @@ func updateIndex(res map[string]interface{}) {
 		log.Printf("updateIndex: unable to cast response to type map[string]interface{}\n\n")
 		return
 	}
-	if reflect.TypeOf(data["price"]) == nil { //catch ping response, inappropriate to catch here, should fix later
-		return
-	}
+	// if reflect.TypeOf(data["price"]) == nil { //catch ping response, inappropriate to catch here, should fix later
+	// 	return
+	// }
 
 	asset := strings.TrimPrefix(channel, "index:")
 	// fmt.Printf("asset: %v\n\n", asset)
@@ -414,7 +510,7 @@ func updateIndex(res map[string]interface{}) {
 		return
 	}
 
-	Index[asset] = price
+	AevoIndex[asset] = price
 	// fmt.Printf("index: %+v\n\n", Index)
 }
 
@@ -434,7 +530,7 @@ func findApy(expiry string, relProfit float64) float64 {
 }
 
 func updateArbTables(asset string) {
-	index := Index[asset]
+	index := AevoIndex[asset]
 
 	for key, orderbook := range Orderbooks {
 		components := strings.Split(key, "-")
@@ -543,15 +639,24 @@ func lyraWssReadLoop(ctx context.Context, c *websocket.Conn) {
 		params, ok := res["params"].(map[string]interface{})
 		if !ok {
 			log.Printf("lyraWssReadLoop: unable to convert res['params'] to map[string]interface{}: (raw response): %v\n\n", string(raw))
+			continue
 		}
-		// fmt.Printf("%+v\n\n", params)
 
 		data, ok := params["data"].(map[string]interface{})
-		if !ok {
-			log.Printf("lyraWssReadLoop: unable to convert res['data'] to map[string]interface{}: (raw response): %v\n\n", string(raw))
+		channel, chanOk := params["channel"].(string)
+		if !ok || !chanOk {
+			log.Printf("lyraWssReadLoop: unable to convert params['data'] to map[string]interface{} or params['channel'] to string: (raw response): %v\n dataOk: %v\nchannelOk: %v\n\n", string(raw), ok, chanOk)
+			continue
 		}
-		fmt.Printf("%+v\n\n", data)
+		// fmt.Printf("%+v\n\n", res)
 
+		if strings.Contains(channel, "orderbook") {
+			lyraUpdateOrderbooks(data)
+		}
+		if strings.Contains(channel, "spot_feed") {
+			lyraUpdateIndex(data)
+			fmt.Printf("%+v\n\n", LyraIndex["ETH"])
+		}
 	}
 }
 
@@ -610,12 +715,15 @@ func wssPingLoop(ctx context.Context, c *websocket.Conn) {
 
 func lyraWssReqLoop(ctx context.Context, c *websocket.Conn) {
 	for {
+		assets := []string{"ETH"}
 		markets := lyraMarkets("ETH")
 		instruments := lyraInstruments(markets)
 		fmt.Printf("Lyra number of instruments: %v\n\n", len(instruments))
 
 		lyraWssReqOrderbook(instruments, ctx, c)
 		log.Printf("Requested Lyra Orderbooks")
+		lyraWssReqIndex(assets, ctx, c)
+		log.Printf("Requested Lyra Index")
 
 		time.Sleep(time.Minute * 10)
 	}
@@ -631,7 +739,7 @@ func wssReqLoop(ctx context.Context, c *websocket.Conn) {
 		wssReqOrderbook(instruments, ctx, c)
 		log.Printf("Requested Aevo Orderbooks")
 		wssReqIndex(assets, ctx, c)
-		log.Printf("Requested Index")
+		log.Printf("Requested Aevo Index")
 
 		time.Sleep(time.Minute * 10)
 	}
@@ -706,18 +814,14 @@ func arbTableHandler(w http.ResponseWriter, r *http.Request) {
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	responseStr := ""
-	for key, value := range Index {
+	for key, value := range AevoIndex {
 		responseStr += fmt.Sprintf(`<h3>%s: %s</h3>`, key, strconv.FormatFloat(value, 'f', 3, 64))
 	}
 	fmt.Fprint(w, responseStr)
 }
 
 func main() {
-
-	fmt.Printf("%+v\n\n", instruments)
-
 	lyraWss()
-
 	// go aevoWss()
 
 	http.HandleFunc("/", serveHome)
