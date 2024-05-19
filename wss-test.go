@@ -172,9 +172,16 @@ func instruments(markets []Market) []string {
 	return instruments
 }
 
-func lyraOrderbookJson() []byte {
+func lyraOrderbookJson(instruments []string) []byte {
 	params := make(map[string][]string)
-	params["channels"] = []string{"orderbook.ETH-20240531-3200-P.1.10"}
+	params["channels"] = []string{}
+	// "orderbook.ETH-20240531-3200-P.1.10"
+
+	var param string
+	for _, instrument := range instruments {
+		param = "orderbook." + instrument + ".10.10"
+		params["channels"] = append(params["channels"], param)
+	}
 
 	data := struct {
 		Id     string              `json:"id"`
@@ -232,8 +239,8 @@ func indexJson(assets []string) []byte {
 	return jsonData
 }
 
-func lyraWssReqOrderbook(ctx context.Context, c *websocket.Conn) {
-	data := lyraOrderbookJson()
+func lyraWssReqOrderbook(instruments []string, ctx context.Context, c *websocket.Conn) {
+	data := lyraOrderbookJson(instruments)
 
 	err := c.Write(ctx, 1, data)
 	if err != nil {
@@ -309,6 +316,22 @@ func unpackOrders(orders []interface{}) ([]Order, error) {
 	return unpackedOrders, nil
 }
 
+// func lyraUpdateOrderbooks(data map[string]interface{}) {
+// 	instrument, ok := data["instrument_name"].(string)
+// 	bidsRaw, bidsOk := data["bids"].([]interface{})
+// 	asksRaw, asksOk := data["asks"].([]interface{})
+// 	timeStr, timeOk := data["timestamp"].(float64)
+// 	if (!ok || !timeOk) || !(bidsOk || asksOk) {
+// 		log.Printf("lyraUpdateOrderbooks: unable to convert field: response: %+v", data)
+// 		return
+// 	}
+
+// 	if len(bidsRaw) <= 0 && len(asksRaw) <= 0 {
+// 		return
+// 	}
+
+// }
+
 func updateOrderbooks(res map[string]interface{}) {
 	data, ok := res["data"].(map[string]interface{})
 	if !ok {
@@ -316,16 +339,20 @@ func updateOrderbooks(res map[string]interface{}) {
 		return
 	}
 
-	if len(data) <= 3 { //check for ping response, not very robust and inappropriate to catch here, might need to fix later
-		return
-	}
+	// if len(data) <= 3 { //check for ping response, not very robust and inappropriate to catch here, might need to fix later
+	// 	return
+	// }
 
 	instrument, ok := data["instrument_name"].(string)
 	bidsRaw, bidsOk := data["bids"].([]interface{})
 	asksRaw, asksOk := data["asks"].([]interface{})
 	timeStr, timeOk := data["last_updated"].(string)
 	if (!ok || !timeOk) || !(bidsOk || asksOk) {
-		log.Printf("updateOrderbooks: unable to convert field: response: %v", res)
+		log.Printf("updateOrderbooks: unable to convert field: response: %+v", res)
+		return
+	}
+
+	if len(bidsRaw) <= 0 && len(asksRaw) <= 0 {
 		return
 	}
 
@@ -500,35 +527,51 @@ func wssRead(ctx context.Context, c *websocket.Conn) []byte {
 	return raw //return error as well?
 }
 
-func wssReadLoop(ctx context.Context, c *websocket.Conn) { //add exit condition, add ping or use Reader instead of Read to automatically manage ping, disconnect, etc
+func lyraWssReadLoop(ctx context.Context, c *websocket.Conn) {
 	var raw []byte
 	var res map[string]interface{}
-	// longest, _ := time.ParseDuration("0s")
+
 	for {
 		raw = wssRead(ctx, c)
 
-		// start := time.Now()
 		err := json.Unmarshal(raw, &res)
 		if err != nil {
-			log.Printf("readLoop: error unmarshaling orderbookRaw: %v\n\n", err)
+			log.Printf("lyraWssReadLoop: error unmarshaling orderbookRaw: %v\n\n", err)
+			continue
+		}
+
+		params, ok := res["params"].(map[string]interface{})
+		if !ok {
+			log.Printf("lyraWssReadLoop: unable to convert res['params'] to map[string]interface{}: (raw response): %v\n\n", string(raw))
+		}
+		// fmt.Printf("%+v\n\n", params)
+
+		data, ok := params["data"].(map[string]interface{})
+		if !ok {
+			log.Printf("lyraWssReadLoop: unable to convert res['data'] to map[string]interface{}: (raw response): %v\n\n", string(raw))
+		}
+		fmt.Printf("%+v\n\n", data)
+
+	}
+}
+
+func wssReadLoop(ctx context.Context, c *websocket.Conn) { //add exit condition, add ping or use Reader instead of Read to automatically manage ping, disconnect, etc
+	var raw []byte
+	var res map[string]interface{}
+	for {
+		raw = wssRead(ctx, c)
+
+		err := json.Unmarshal(raw, &res)
+		if err != nil {
+			log.Printf("aevoWssReadLoop: error unmarshaling orderbookRaw: %v\n\n", err)
 			continue
 		}
 
 		channel, ok := res["channel"].(string)
-		// data, dataOk := res["data"].(map[string]interface{})
 		if !ok {
-			log.Printf("readLoop: unable to convert response 'channel' to string\n\n")
+			log.Printf("aevoWssReadLoop: unable to convert response 'channel' to string\n\n")
 			continue
 		}
-		// if !dataOk {
-		// 	log.Printf("readLoop: unable to convert response 'data' to map[string]interface{}\n\n")
-		// 	continue
-		// }
-
-		// if len(data) <= 3 { //check for ping response, not very robust, might need to fix later
-		// 	fmt.Printf("%+v\n\n", res)
-		// 	continue
-		// }
 
 		if strings.Contains(channel, "orderbook") {
 			updateOrderbooks(res)
@@ -538,12 +581,6 @@ func wssReadLoop(ctx context.Context, c *websocket.Conn) { //add exit condition,
 			updateIndex(res)
 			updateArbTables("ETH")
 		}
-
-		// duration := time.Since(start)
-		// if duration > longest {
-		// 	longest = duration
-		// }
-		// fmt.Printf("longest loop time: %v\n\n", longest)
 	}
 }
 
@@ -571,15 +608,28 @@ func wssPingLoop(ctx context.Context, c *websocket.Conn) {
 	}
 }
 
+func lyraWssReqLoop(ctx context.Context, c *websocket.Conn) {
+	for {
+		markets := lyraMarkets("ETH")
+		instruments := lyraInstruments(markets)
+		fmt.Printf("Lyra number of instruments: %v\n\n", len(instruments))
+
+		lyraWssReqOrderbook(instruments, ctx, c)
+		log.Printf("Requested Lyra Orderbooks")
+
+		time.Sleep(time.Minute * 10)
+	}
+}
+
 func wssReqLoop(ctx context.Context, c *websocket.Conn) {
 	for {
 		assets := []string{"ETH"}
 		markets := markets("ETH")
 		instruments := instruments(markets)
-		fmt.Printf("Number of instruments: %v\n\n", len(instruments))
+		fmt.Printf("Aevo number of instruments: %v\n\n", len(instruments))
 
 		wssReqOrderbook(instruments, ctx, c)
-		log.Printf("Requested Orderbooks")
+		log.Printf("Requested Aevo Orderbooks")
 		wssReqIndex(assets, ctx, c)
 		log.Printf("Requested Index")
 
@@ -599,11 +649,8 @@ func lyraWss() {
 	defer c.Close(websocket.StatusNormalClosure, "")
 	defer c.CloseNow()
 
-	lyraWssReqOrderbook(ctx, c)
-	for {
-		raw := wssRead(ctx, c)
-		fmt.Printf("%+v\n\n", string(raw))
-	}
+	go lyraWssReqLoop(ctx, c)
+	lyraWssReadLoop(ctx, c)
 }
 
 func aevoWss() {
@@ -666,8 +713,6 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	markets := lyraMarkets("ETH")
-	instruments := lyraInstruments(markets)
 
 	fmt.Printf("%+v\n\n", instruments)
 
