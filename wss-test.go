@@ -59,9 +59,10 @@ type Market struct {
 }
 
 type Order struct {
-	Price  float64
-	Amount float64
-	Iv     float64
+	Price    float64
+	Amount   float64
+	Iv       float64
+	Exchange string
 }
 
 type OrderbookData struct {
@@ -71,16 +72,18 @@ type OrderbookData struct {
 }
 
 type ArbTable struct {
-	Asset     string
-	Expiry    string
-	Strike    float64
-	Bids      []Order
-	Asks      []Order
-	BidType   string
-	AskType   string
-	AbsProfit float64
-	RelProfit float64
-	Apy       float64
+	Asset       string
+	Expiry      string
+	Strike      float64
+	Bids        []Order
+	Asks        []Order
+	BidType     string
+	AskType     string
+	BidExchange string
+	AskExchange string
+	AbsProfit   float64
+	RelProfit   float64
+	Apy         float64
 }
 
 var Orderbooks map[string]*OrderbookData = make(map[string]*OrderbookData) //pointer seems like a bad idea but makes assignment of elements easier
@@ -359,12 +362,13 @@ func unpackOrders(orders []interface{}, exchange string) ([]Order, error) {
 			return unpackedOrders, errors.New("error converting string to float64")
 		}
 
-		unpackedOrders = append(unpackedOrders, Order{price, amount, iv})
+		unpackedOrders = append(unpackedOrders, Order{price, amount, iv, exchange})
 	}
 
 	return unpackedOrders, nil
 }
 
+// loop through []Orders and replace each element with best bid (highest) and best ask (lowest)
 func lyraUpdateOrderbooks(data map[string]interface{}) {
 	lyraInstrument, ok := data["instrument_name"].(string)
 	bidsRaw, bidsOk := data["bids"].([]interface{})
@@ -395,10 +399,18 @@ func lyraUpdateOrderbooks(data map[string]interface{}) {
 	expiry := strings.ToUpper(expiryTs.Format("02Jan06"))
 	instrument := instrumentParts[0] + "-" + expiry + "-" + instrumentParts[2] + "-" + instrumentParts[3]
 
-	Orderbooks[instrument] = &OrderbookData{
-		Bids:        bids,
-		Asks:        asks,
-		LastUpdated: timestamp,
+	_, exists := Orderbooks[instrument]
+
+	if exists {
+		Orderbooks[instrument].Bids = append(Orderbooks[instrument].Bids, bids...)
+		Orderbooks[instrument].Asks = append(Orderbooks[instrument].Asks, asks...)
+		Orderbooks[instrument].LastUpdated = timestamp
+	} else {
+		Orderbooks[instrument] = &OrderbookData{
+			Bids:        bids,
+			Asks:        asks,
+			LastUpdated: timestamp,
+		}
 	}
 
 	// fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
@@ -442,13 +454,28 @@ func updateOrderbooks(res map[string]interface{}) {
 		return
 	}
 
-	Orderbooks[instrument] = &OrderbookData{
-		Bids:        bids,
-		Asks:        asks,
-		LastUpdated: lastUpdated,
+	_, exists := Orderbooks[instrument]
+
+	if exists {
+		Orderbooks[instrument].Bids = append(Orderbooks[instrument].Bids, bids...)
+		Orderbooks[instrument].Asks = append(Orderbooks[instrument].Asks, asks...)
+		Orderbooks[instrument].LastUpdated = lastUpdated
+	} else {
+		Orderbooks[instrument] = &OrderbookData{
+			Bids:        bids,
+			Asks:        asks,
+			LastUpdated: lastUpdated,
+		}
 	}
 
-	fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
+	sort.Slice(Orderbooks[instrument].Bids, func(i, j int) bool {
+		return Orderbooks[instrument].Bids[i].Price < Orderbooks[instrument].Bids[j].Price
+	})
+	sort.Slice(Orderbooks[instrument].Asks, func(i, j int) bool {
+		return Orderbooks[instrument].Asks[i].Price < Orderbooks[instrument].Asks[j].Price
+	})
+
+	// fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
 	// if strings.Contains(instrument, "-C") {
 	// 	instrumentTrim, _ := strings.CutSuffix(instrument, "-C")
 	// 	fmt.Printf("%v: %+v\n\n", instrumentTrim, ArbTables[instrumentTrim])
@@ -530,9 +557,7 @@ func findApy(expiry string, relProfit float64) float64 {
 }
 
 func updateArbTables(asset string) {
-	index := AevoIndex[asset]
-
-	for key, orderbook := range Orderbooks {
+	for key, orderbook := range Orderbooks { //orderbook is call, orderbook2 is put
 		components := strings.Split(key, "-")
 		expiry := components[1]
 		strike, err := strconv.ParseFloat(components[2], 64)
@@ -563,25 +588,36 @@ func updateArbTables(asset string) {
 		var absProfit float64
 		var callBid float64
 		var putAsk float64
+		var index float64
 		if len(orderbook.Bids) > 0 && len(orderbook2.Asks) > 0 {
 			callBid = orderbook.Bids[0].Price
 			putAsk = orderbook2.Asks[0].Price
+
+			switch orderbook2.Asks[0].Exchange {
+			case "aevo":
+				index = AevoIndex[asset]
+			case "lyra":
+				index = LyraIndex[asset]
+			}
+
 			absProfit = math.Abs((index + putAsk) - (strike + callBid))
 			relProfit := absProfit / (index + putAsk + callBid) * 100
 			apy := findApy(expiry, relProfit)
 
 			if callBid+strike > putAsk+index {
 				ArbTables[keyTrim] = &ArbTable{
-					Asset:     asset,
-					Expiry:    expiry,
-					Strike:    strike,
-					Bids:      orderbook.Bids,
-					Asks:      orderbook2.Asks,
-					BidType:   "C",
-					AskType:   "P",
-					AbsProfit: absProfit,
-					RelProfit: relProfit,
-					Apy:       apy,
+					Asset:       asset,
+					Expiry:      expiry,
+					Strike:      strike,
+					Bids:        orderbook.Bids,
+					Asks:        orderbook2.Asks,
+					BidType:     "C",
+					AskType:     "P",
+					BidExchange: orderbook.Bids[0].Exchange,
+					AskExchange: orderbook2.Asks[0].Exchange,
+					AbsProfit:   absProfit,
+					RelProfit:   relProfit,
+					Apy:         apy,
 				}
 			}
 		}
@@ -597,16 +633,18 @@ func updateArbTables(asset string) {
 
 			if callAsk+strike < putBid+index && thisProfit > absProfit {
 				ArbTables[keyTrim] = &ArbTable{
-					Asset:     asset,
-					Expiry:    expiry,
-					Strike:    strike,
-					Bids:      orderbook2.Bids,
-					Asks:      orderbook.Asks,
-					BidType:   "P",
-					AskType:   "C",
-					AbsProfit: thisProfit,
-					RelProfit: relProfit,
-					Apy:       apy,
+					Asset:       asset,
+					Expiry:      expiry,
+					Strike:      strike,
+					Bids:        orderbook2.Bids,
+					Asks:        orderbook.Asks,
+					BidType:     "P",
+					AskType:     "C",
+					BidExchange: orderbook2.Bids[0].Exchange,
+					AskExchange: orderbook.Asks[0].Exchange,
+					AbsProfit:   thisProfit,
+					RelProfit:   relProfit,
+					Apy:         apy,
 				}
 			}
 		}
@@ -655,7 +693,7 @@ func lyraWssReadLoop(ctx context.Context, c *websocket.Conn) {
 		}
 		if strings.Contains(channel, "spot_feed") {
 			lyraUpdateIndex(data)
-			fmt.Printf("%+v\n\n", LyraIndex["ETH"])
+			updateArbTables("ETH")
 		}
 	}
 }
@@ -796,11 +834,13 @@ func arbTableHandler(w http.ResponseWriter, r *http.Request) {
 
 	responseStr := ""
 	for _, value := range arbTablesSlice {
-		responseStr += fmt.Sprintf(`<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+		responseStr += fmt.Sprintf(`<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
 			value.Expiry,
 			strconv.FormatFloat(value.Strike, 'f', 3, 64),
+			value.BidExchange,
 			value.BidType,
 			strconv.FormatFloat(value.Bids[0].Price, 'f', 3, 64),
+			value.AskExchange,
 			value.AskType,
 			strconv.FormatFloat(value.Asks[0].Price, 'f', 3, 64),
 			strconv.FormatFloat(value.AbsProfit, 'f', 3, 64),
@@ -821,8 +861,8 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	lyraWss()
-	// go aevoWss()
+	go lyraWss()
+	go aevoWss()
 
 	http.HandleFunc("/", serveHome)
 	http.HandleFunc("/update-table", arbTableHandler)
