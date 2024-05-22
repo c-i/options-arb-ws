@@ -23,6 +23,12 @@ const AevoWss string = "wss://ws.aevo.xyz"
 const LyraHttp string = "https://api.lyra.finance"
 const LyraWss string = "wss://api.lyra.finance/ws"
 
+type connData struct {
+	Ctx    context.Context
+	Conn   *websocket.Conn
+	Cancel context.CancelFunc
+}
+
 type wssData struct {
 	Op   string   `json:"op"`
 	Data []string `json:"data"`
@@ -271,11 +277,25 @@ func indexJson(assets []string) []byte {
 }
 
 func lyraWssReqOrderbook(instruments []string, ctx context.Context, c *websocket.Conn) {
-	data := lyraOrderbookJson(instruments)
+	var data []byte
+	for i := 0; true; i += 20 {
+		if i+20 < len(instruments) {
+			data = lyraOrderbookJson(instruments[i : i+20])
+		} else {
+			data = lyraOrderbookJson(instruments[i:])
+		}
 
-	err := c.Write(ctx, 1, data)
-	if err != nil {
-		log.Fatalf("Write error: %v\n", err)
+		// fmt.Printf("subscribe: %v\n\n", string(data))
+		err := c.Write(ctx, 1, data)
+		if err != nil {
+			log.Fatalf("Write error: %v\n", err)
+		}
+
+		if i+20 > len(instruments) {
+			break
+		}
+
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -402,6 +422,7 @@ func lyraUpdateOrderbooks(data map[string]interface{}) {
 	_, exists := Orderbooks[instrument]
 
 	if exists {
+
 		Orderbooks[instrument].Bids = append(Orderbooks[instrument].Bids, bids...)
 		Orderbooks[instrument].Asks = append(Orderbooks[instrument].Asks, asks...)
 		Orderbooks[instrument].LastUpdated = timestamp
@@ -457,6 +478,7 @@ func updateOrderbooks(res map[string]interface{}) {
 	_, exists := Orderbooks[instrument]
 
 	if exists {
+
 		Orderbooks[instrument].Bids = append(Orderbooks[instrument].Bids, bids...)
 		Orderbooks[instrument].Asks = append(Orderbooks[instrument].Asks, asks...)
 		Orderbooks[instrument].LastUpdated = lastUpdated
@@ -550,14 +572,83 @@ func findApy(expiry string, relProfit float64) float64 {
 	timestamp := float64(ts.Unix())
 	now := float64(time.Now().Unix())
 
-	apy := math.Pow(1.0+relProfit, 365/math.Ceil((1+timestamp-now)/86400))
+	apy := math.Pow(1.0+(relProfit/100), 365/math.Ceil((1+timestamp-now)/86400)) * 100
 	// apy := 365/math.Ceil((1+timestamp-now)/86400) * relProfit
 
 	return apy
 }
 
+func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putOrderbook *OrderbookData, expiry string, strike float64) {
+
+	//  abs((index + put) - (strike + call))
+	var absProfit float64
+	var callBid float64
+	var putAsk float64
+	var index float64
+	if len(callOrderbook.Bids) > 0 && len(putOrderbook.Asks) > 0 {
+		callBid = callOrderbook.Bids[0].Price
+		putAsk = putOrderbook.Asks[0].Price
+
+		index = AevoIndex[asset]
+
+		_, exists := LyraIndex["ETH"]
+		if putOrderbook.Asks[0].Exchange == "lyra" && exists {
+			index = LyraIndex[asset]
+		}
+
+		absProfit = math.Abs((index + putAsk) - (strike + callBid))
+		relProfit := absProfit / (index + putAsk + callBid) * 100
+		apy := findApy(expiry, relProfit)
+
+		if callBid+strike > putAsk+index {
+			ArbTables[key] = &ArbTable{
+				Asset:       asset,
+				Expiry:      expiry,
+				Strike:      strike,
+				Bids:        callOrderbook.Bids,
+				Asks:        putOrderbook.Asks,
+				BidType:     "C",
+				AskType:     "P",
+				BidExchange: callOrderbook.Bids[0].Exchange,
+				AskExchange: putOrderbook.Asks[0].Exchange,
+				AbsProfit:   absProfit,
+				RelProfit:   relProfit,
+				Apy:         apy,
+			}
+		}
+	}
+
+	var callAsk float64
+	var putBid float64
+	if len(callOrderbook.Asks) > 0 && len(putOrderbook.Bids) > 0 {
+		callAsk = callOrderbook.Asks[0].Price
+		putBid = putOrderbook.Bids[0].Price
+		thisProfit := math.Abs((index + putBid) - (strike + callAsk))
+		relProfit := thisProfit / (index + callAsk + putBid) * 100
+		apy := findApy(expiry, relProfit)
+
+		if callAsk+strike < putBid+index && thisProfit > absProfit {
+			ArbTables[key] = &ArbTable{
+				Asset:       asset,
+				Expiry:      expiry,
+				Strike:      strike,
+				Bids:        putOrderbook.Bids,
+				Asks:        callOrderbook.Asks,
+				BidType:     "P",
+				AskType:     "C",
+				BidExchange: putOrderbook.Bids[0].Exchange,
+				AskExchange: callOrderbook.Asks[0].Exchange,
+				AbsProfit:   thisProfit,
+				RelProfit:   relProfit,
+				Apy:         apy,
+			}
+		}
+	}
+}
+
 func updateArbTables(asset string) {
-	for key, orderbook := range Orderbooks { //orderbook is call, orderbook2 is put
+	for key, orderbook := range Orderbooks {
+
 		components := strings.Split(key, "-")
 		expiry := components[1]
 		strike, err := strconv.ParseFloat(components[2], 64)
@@ -584,146 +675,87 @@ func updateArbTables(asset string) {
 		if !exists {
 			continue
 		}
-		//  abs((index + put) - (strike + call))
-		var absProfit float64
-		var callBid float64
-		var putAsk float64
-		var index float64
-		if len(orderbook.Bids) > 0 && len(orderbook2.Asks) > 0 {
-			callBid = orderbook.Bids[0].Price
-			putAsk = orderbook2.Asks[0].Price
 
-			switch orderbook2.Asks[0].Exchange {
-			case "aevo":
-				index = AevoIndex[asset]
-			case "lyra":
-				index = LyraIndex[asset]
-			}
-
-			absProfit = math.Abs((index + putAsk) - (strike + callBid))
-			relProfit := absProfit / (index + putAsk + callBid) * 100
-			apy := findApy(expiry, relProfit)
-
-			if callBid+strike > putAsk+index {
-				ArbTables[keyTrim] = &ArbTable{
-					Asset:       asset,
-					Expiry:      expiry,
-					Strike:      strike,
-					Bids:        orderbook.Bids,
-					Asks:        orderbook2.Asks,
-					BidType:     "C",
-					AskType:     "P",
-					BidExchange: orderbook.Bids[0].Exchange,
-					AskExchange: orderbook2.Asks[0].Exchange,
-					AbsProfit:   absProfit,
-					RelProfit:   relProfit,
-					Apy:         apy,
-				}
-			}
-		}
-
-		var callAsk float64
-		var putBid float64
-		if len(orderbook.Asks) > 0 && len(orderbook2.Bids) > 0 {
-			callAsk = orderbook.Asks[0].Price
-			putBid = orderbook2.Bids[0].Price
-			thisProfit := math.Abs((index + putBid) - (strike + callAsk))
-			relProfit := thisProfit / (index + callAsk + putBid) * 100
-			apy := findApy(expiry, relProfit)
-
-			if callAsk+strike < putBid+index && thisProfit > absProfit {
-				ArbTables[keyTrim] = &ArbTable{
-					Asset:       asset,
-					Expiry:      expiry,
-					Strike:      strike,
-					Bids:        orderbook2.Bids,
-					Asks:        orderbook.Asks,
-					BidType:     "P",
-					AskType:     "C",
-					BidExchange: orderbook2.Bids[0].Exchange,
-					AskExchange: orderbook.Asks[0].Exchange,
-					AbsProfit:   thisProfit,
-					RelProfit:   relProfit,
-					Apy:         apy,
-				}
-			}
-		}
+		updateArbTable(asset, keyTrim, orderbook, orderbook2, expiry, strike)
 
 	}
 }
 
-func wssRead(ctx context.Context, c *websocket.Conn) []byte {
+func wssRead(ctx context.Context, c *websocket.Conn) ([]byte, error) {
 	_, raw, err := c.Read(ctx)
 	if err != nil {
-		log.Printf("wssRead: read error: %v, response: %v", err, raw)
+		return raw, fmt.Errorf("wssRead: read error: %v\n(response): %v", err, raw)
 	}
 
-	return raw //return error as well?
+	return raw, nil //return error as well?
 }
 
-func lyraWssReadLoop(ctx context.Context, c *websocket.Conn) {
-	var raw []byte
+func lyraWssRead(ctx context.Context, c *websocket.Conn) {
 	var res map[string]interface{}
-
-	for {
-		raw = wssRead(ctx, c)
-
-		err := json.Unmarshal(raw, &res)
-		if err != nil {
-			log.Printf("lyraWssReadLoop: error unmarshaling orderbookRaw: %v\n\n", err)
-			continue
-		}
-
-		params, ok := res["params"].(map[string]interface{})
-		if !ok {
-			log.Printf("lyraWssReadLoop: unable to convert res['params'] to map[string]interface{}: (raw response): %v\n\n", string(raw))
-			continue
-		}
-
-		data, ok := params["data"].(map[string]interface{})
-		channel, chanOk := params["channel"].(string)
-		if !ok || !chanOk {
-			log.Printf("lyraWssReadLoop: unable to convert params['data'] to map[string]interface{} or params['channel'] to string: (raw response): %v\n dataOk: %v\nchannelOk: %v\n\n", string(raw), ok, chanOk)
-			continue
-		}
-		// fmt.Printf("%+v\n\n", res)
-
-		if strings.Contains(channel, "orderbook") {
-			lyraUpdateOrderbooks(data)
-		}
-		if strings.Contains(channel, "spot_feed") {
-			lyraUpdateIndex(data)
-			updateArbTables("ETH")
-		}
+	raw, err := wssRead(ctx, c)
+	if err != nil {
+		log.Printf("lyraWssRead: %v\n(response): %v\n\n", err, string(raw))
+		return
 	}
+
+	err = json.Unmarshal(raw, &res)
+	if err != nil {
+		log.Printf("lyraWssRead: error unmarshaling orderbookRaw: %v\n(response): %v\n\n", err, string(raw))
+		return
+	}
+
+	params, ok := res["params"].(map[string]interface{})
+	if !ok {
+		log.Printf("lyraWssRead: unable to convert res['params'] to map[string]interface{}: (raw response): %v\n\n", string(raw))
+		return
+	}
+
+	data, ok := params["data"].(map[string]interface{})
+	channel, chanOk := params["channel"].(string)
+	if !ok || !chanOk {
+		log.Printf("lyraWssRead: unable to convert params['data'] to map[string]interface{} or params['channel'] to string: (raw response): %v\n dataOk: %v\nchannelOk: %v\n\n", string(raw), ok, chanOk)
+		return
+	}
+	// fmt.Printf("%+v\n\n", res)
+
+	if strings.Contains(channel, "orderbook") {
+		lyraUpdateOrderbooks(data)
+	}
+	if strings.Contains(channel, "spot_feed") {
+		lyraUpdateIndex(data)
+		updateArbTables("ETH")
+		// fmt.Printf("Lyra index: %v\n\n", LyraIndex["ETH"])
+	}
+
 }
 
-func wssReadLoop(ctx context.Context, c *websocket.Conn) { //add exit condition, add ping or use Reader instead of Read to automatically manage ping, disconnect, etc
-	var raw []byte
+func aevoWssRead(ctx context.Context, c *websocket.Conn) { //add exit condition, add ping or use Reader instead of Read to automatically manage ping, disconnect, etc
 	var res map[string]interface{}
-	for {
-		raw = wssRead(ctx, c)
+	raw, err := wssRead(ctx, c)
+	if err != nil {
+		log.Printf("aevoWssRead: %v\n(response): %v\n\n", err, string(raw))
+		return
+	}
 
-		err := json.Unmarshal(raw, &res)
-		if err != nil {
-			log.Printf("aevoWssReadLoop: error unmarshaling orderbookRaw: %v\n\n", err)
-			continue
-		}
+	err = json.Unmarshal(raw, &res)
+	if err != nil {
+		log.Printf("aevoWssRead: error unmarshaling orderbookRaw: %v\n\n", err)
+		return
+	}
 
-		channel, ok := res["channel"].(string)
-		if !ok {
-			log.Printf("aevoWssReadLoop: unable to convert response 'channel' to string\n\n")
-			continue
-		}
+	channel, ok := res["channel"].(string)
+	if !ok {
+		log.Printf("aevoWssRead: unable to convert response 'channel' to string\n\n")
+		return
+	}
 
-		if strings.Contains(channel, "orderbook") {
-			updateOrderbooks(res)
-		}
+	if strings.Contains(channel, "orderbook") {
+		updateOrderbooks(res)
+	}
 
-		if strings.Contains(channel, "index") {
-			updateIndex(res)
-			updateArbTables("ETH")
-		}
+	if strings.Contains(channel, "index") {
+		updateIndex(res)
+		updateArbTables("ETH")
 	}
 }
 
@@ -767,7 +799,7 @@ func lyraWssReqLoop(ctx context.Context, c *websocket.Conn) {
 	}
 }
 
-func wssReqLoop(ctx context.Context, c *websocket.Conn) {
+func aevoWssReqLoop(ctx context.Context, c *websocket.Conn) {
 	for {
 		assets := []string{"ETH"}
 		markets := markets("ETH")
@@ -783,39 +815,42 @@ func wssReqLoop(ctx context.Context, c *websocket.Conn) {
 	}
 }
 
-func lyraWss() {
+func dialLyra() (context.Context, *websocket.Conn, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	c, res, err := websocket.Dial(ctx, LyraWss, nil)
 	if err != nil {
 		log.Fatalf("Dial error: %v", err)
 	}
 	fmt.Printf("%v\n\n", res)
-	defer c.Close(websocket.StatusNormalClosure, "")
-	defer c.CloseNow()
 
-	go lyraWssReqLoop(ctx, c)
-	lyraWssReadLoop(ctx, c)
+	return ctx, c, cancel
 }
 
-func aevoWss() {
+func dialAevo() (context.Context, *websocket.Conn, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	c, res, err := websocket.Dial(ctx, AevoWss, nil)
 	if err != nil {
 		log.Fatalf("Dial error: %v", err)
 	}
 	fmt.Printf("%v\n\n", res)
-	defer c.Close(websocket.StatusNormalClosure, "")
-	defer c.CloseNow()
 
-	// wssReqOrderbook(instruments, ctx, c)
-	// wssReqIndex(assets, ctx, c)
-	// go wssPingLoop(ctx, c)
-	go wssReqLoop(ctx, c)
-	wssReadLoop(ctx, c)
+	return ctx, c, cancel
+}
+
+func mainEventLoop(connections map[string]connData) {
+	// maxTime := time.Second * 0
+	for {
+		// start := time.Now()
+		aevoWssRead(connections["aevo"].Ctx, connections["aevo"].Conn)
+		lyraWssRead(connections["lyra"].Ctx, connections["lyra"].Conn)
+		// duration := time.Since(start)
+		// if duration > maxTime && duration < time.Second*2 {
+		// 	maxTime = duration
+		// }
+		// log.Printf("loop time: %v\nmax time: %v\n\n", duration, maxTime)
+	}
 }
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
@@ -827,8 +862,10 @@ func arbTableHandler(w http.ResponseWriter, r *http.Request) {
 	arbTablesSlice := make([]*ArbTable, len(ArbTables))
 	i := 0
 	for _, table := range ArbTables {
+
 		arbTablesSlice[i] = table
 		i++
+
 	}
 	sort.Slice(arbTablesSlice, func(i, j int) bool { return arbTablesSlice[i].Apy > arbTablesSlice[j].Apy })
 
@@ -854,15 +891,36 @@ func arbTableHandler(w http.ResponseWriter, r *http.Request) {
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	responseStr := ""
+	text := ""
 	for key, value := range AevoIndex {
-		responseStr += fmt.Sprintf(`<h3>%s: %s</h3>`, key, strconv.FormatFloat(value, 'f', 3, 64))
+		text += fmt.Sprintf(`%s: %s &nbsp;&nbsp;&nbsp;`, key, strconv.FormatFloat(value, 'f', 3, 64))
+		responseStr += fmt.Sprintf(`<h3>Aevo:  %s</h3>`, text)
+	}
+	for key, value := range LyraIndex {
+		text += fmt.Sprintf(`%s: %s &nbsp;&nbsp;&nbsp;`, key, strconv.FormatFloat(value, 'f', 3, 64))
+		responseStr += fmt.Sprintf(`<h3>Lyra:  %s</h3>`, text)
 	}
 	fmt.Fprint(w, responseStr)
 }
 
 func main() {
-	go lyraWss()
-	go aevoWss()
+	aevoCtx, aevoConn, aevoCancel := dialAevo()
+	lyraCtx, lyraConn, lyraCancel := dialLyra()
+	connections := map[string]connData{
+		"aevo": {aevoCtx, aevoConn, aevoCancel},
+		"lyra": {lyraCtx, lyraConn, lyraCancel},
+	}
+	defer aevoCancel()
+	defer aevoConn.Close(websocket.StatusNormalClosure, "")
+	defer aevoConn.CloseNow()
+	defer lyraCancel()
+	defer lyraConn.Close(websocket.StatusNormalClosure, "")
+	defer lyraConn.CloseNow()
+
+	go aevoWssReqLoop(aevoCtx, aevoConn)
+	go lyraWssReqLoop(lyraCtx, lyraConn)
+
+	go mainEventLoop(connections)
 
 	http.HandleFunc("/", serveHome)
 	http.HandleFunc("/update-table", arbTableHandler)
