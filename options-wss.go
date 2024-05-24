@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -92,10 +93,20 @@ type ArbTable struct {
 	Apy         float64
 }
 
-var Orderbooks map[string]*OrderbookData = make(map[string]*OrderbookData) //pointer seems like a bad idea but makes assignment of elements easier
-var ArbTables map[string]*ArbTable = make(map[string]*ArbTable)
-var AevoIndex map[string]float64 = make(map[string]float64)
-var LyraIndex map[string]float64 = make(map[string]float64)
+type ArbTablesContainer struct {
+	Mu        sync.Mutex
+	ArbTables map[string]*ArbTable
+}
+
+type IndexContainer struct {
+	Mu    sync.Mutex
+	Index map[string]float64
+}
+
+var Orderbooks = make(map[string]*OrderbookData) //pointer seems like a bad idea but makes assignment of elements easier
+var ArbContainer = ArbTablesContainer{ArbTables: make(map[string]*ArbTable)}
+var AevoIndex = IndexContainer{Index: make(map[string]float64)}
+var LyraIndex = IndexContainer{Index: make(map[string]float64)}
 
 func lyraMarkets(asset string) map[string]interface{} {
 	url := LyraHttp + "/public/get_instruments"
@@ -505,6 +516,9 @@ func updateOrderbooks(res map[string]interface{}) {
 }
 
 func lyraUpdateIndex(data map[string]interface{}) {
+	LyraIndex.Mu.Lock()
+	defer LyraIndex.Mu.Unlock()
+
 	feeds, ok := data["feeds"].(map[string]interface{})
 	if !ok {
 		log.Printf("lyraUpdateIndex: unable to convert data['feeds'] to map[string]interface{}: %+v\n\n", data)
@@ -521,7 +535,7 @@ func lyraUpdateIndex(data map[string]interface{}) {
 		}
 
 		var err error
-		LyraIndex[key], err = strconv.ParseFloat(price, 64)
+		LyraIndex.Index[key], err = strconv.ParseFloat(price, 64)
 		if err != nil {
 			log.Printf("lyraUpdateIndex: strconvParseFloat error: %v\n\n", err)
 		}
@@ -529,6 +543,9 @@ func lyraUpdateIndex(data map[string]interface{}) {
 }
 
 func updateIndex(res map[string]interface{}) {
+	AevoIndex.Mu.Lock()
+	defer AevoIndex.Mu.Unlock()
+
 	channel, ok := res["channel"].(string)
 	if !ok {
 		log.Printf("updateIndex: unable to convert response 'channel' to string: %v\n\n", reflect.TypeOf(res["channel"]))
@@ -559,7 +576,7 @@ func updateIndex(res map[string]interface{}) {
 		return
 	}
 
-	AevoIndex[asset] = price
+	AevoIndex.Index[asset] = price
 	// fmt.Printf("index: %+v\n\n", Index)
 }
 
@@ -579,6 +596,8 @@ func findApy(expiry string, relProfit float64) float64 {
 }
 
 func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putOrderbook *OrderbookData, expiry string, strike float64) {
+	ArbContainer.Mu.Lock()
+	defer ArbContainer.Mu.Unlock()
 
 	//  abs((index + put) - (strike + call))
 	var absProfit float64
@@ -589,11 +608,11 @@ func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putO
 		callBid = callOrderbook.Bids[0].Price
 		putAsk = putOrderbook.Asks[0].Price
 
-		index = AevoIndex[asset]
+		index = AevoIndex.Index[asset]
 
-		_, exists := LyraIndex["ETH"]
+		_, exists := LyraIndex.Index["ETH"]
 		if putOrderbook.Asks[0].Exchange == "lyra" && exists {
-			index = LyraIndex[asset]
+			index = LyraIndex.Index[asset]
 		}
 
 		absProfit = math.Abs((index + putAsk) - (strike + callBid))
@@ -601,7 +620,7 @@ func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putO
 		apy := findApy(expiry, relProfit)
 
 		if callBid+strike > putAsk+index {
-			ArbTables[key] = &ArbTable{
+			ArbContainer.ArbTables[key] = &ArbTable{
 				Asset:       asset,
 				Expiry:      expiry,
 				Strike:      strike,
@@ -628,7 +647,7 @@ func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putO
 		apy := findApy(expiry, relProfit)
 
 		if callAsk+strike < putBid+index && thisProfit > absProfit {
-			ArbTables[key] = &ArbTable{
+			ArbContainer.ArbTables[key] = &ArbTable{
 				Asset:       asset,
 				Expiry:      expiry,
 				Strike:      strike,
@@ -815,22 +834,10 @@ func aevoWssReqLoop(ctx context.Context, c *websocket.Conn) {
 	}
 }
 
-func dialLyra() (context.Context, *websocket.Conn, context.CancelFunc) {
+func dialWss(url string) (context.Context, *websocket.Conn, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	c, res, err := websocket.Dial(ctx, LyraWss, nil)
-	if err != nil {
-		log.Fatalf("Dial error: %v", err)
-	}
-	fmt.Printf("%v\n\n", res)
-
-	return ctx, c, cancel
-}
-
-func dialAevo() (context.Context, *websocket.Conn, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	c, res, err := websocket.Dial(ctx, AevoWss, nil)
+	c, res, err := websocket.Dial(ctx, url, nil)
 	if err != nil {
 		log.Fatalf("Dial error: %v", err)
 	}
@@ -859,13 +866,14 @@ func serveHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func arbTableHandler(w http.ResponseWriter, r *http.Request) {
-	arbTablesSlice := make([]*ArbTable, len(ArbTables))
-	i := 0
-	for _, table := range ArbTables {
+	ArbContainer.Mu.Lock()
+	defer ArbContainer.Mu.Unlock()
 
+	arbTablesSlice := make([]*ArbTable, len(ArbContainer.ArbTables))
+	i := 0
+	for _, table := range ArbContainer.ArbTables {
 		arbTablesSlice[i] = table
 		i++
-
 	}
 	sort.Slice(arbTablesSlice, func(i, j int) bool { return arbTablesSlice[i].Apy > arbTablesSlice[j].Apy })
 
@@ -890,13 +898,19 @@ func arbTableHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
+	AevoIndex.Mu.Lock()
+	LyraIndex.Mu.Lock()
+	defer AevoIndex.Mu.Unlock()
+	defer LyraIndex.Mu.Unlock()
 	responseStr := ""
 	text := ""
-	for key, value := range AevoIndex {
+	for key, value := range AevoIndex.Index {
 		text += fmt.Sprintf(`%s: %s &nbsp;&nbsp;&nbsp;`, key, strconv.FormatFloat(value, 'f', 3, 64))
 		responseStr += fmt.Sprintf(`<h3>Aevo:  %s</h3>`, text)
 	}
-	for key, value := range LyraIndex {
+
+	text = ""
+	for key, value := range LyraIndex.Index {
 		text += fmt.Sprintf(`%s: %s &nbsp;&nbsp;&nbsp;`, key, strconv.FormatFloat(value, 'f', 3, 64))
 		responseStr += fmt.Sprintf(`<h3>Lyra:  %s</h3>`, text)
 	}
@@ -904,8 +918,8 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	aevoCtx, aevoConn, aevoCancel := dialAevo()
-	lyraCtx, lyraConn, lyraCancel := dialLyra()
+	aevoCtx, aevoConn, aevoCancel := dialWss(AevoWss)
+	lyraCtx, lyraConn, lyraCancel := dialWss(LyraWss)
 	connections := map[string]connData{
 		"aevo": {aevoCtx, aevoConn, aevoCancel},
 		"lyra": {lyraCtx, lyraConn, lyraCancel},
