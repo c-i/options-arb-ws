@@ -1,4 +1,4 @@
-package arb
+package main
 
 import (
 	"fmt"
@@ -6,47 +6,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
-
-type Order struct {
-	Price    float64
-	Amount   float64
-	Iv       float64
-	Exchange string
-}
-
-type OrderbookData struct {
-	Bids        []Order
-	Asks        []Order
-	LastUpdated float64
-}
-
-type ArbTable struct {
-	Asset       string
-	Expiry      string
-	Strike      float64
-	Bids        []Order
-	Asks        []Order
-	BidType     string
-	AskType     string
-	BidExchange string
-	AskExchange string
-	AbsProfit   float64
-	RelProfit   float64
-	Apy         float64
-}
-
-type ArbTablesContainer struct {
-	Mu        sync.Mutex
-	ArbTables map[string]*ArbTable
-}
-
-type IndexContainer struct {
-	Mu    sync.Mutex
-	Index map[string]float64
-}
 
 func findApy(expiry string, relProfit float64) float64 {
 	ts, err := time.Parse("02Jan06", expiry)
@@ -63,7 +24,7 @@ func findApy(expiry string, relProfit float64) float64 {
 	return apy
 }
 
-func updateArbTable(ArbContainer *ArbTablesContainer, AevoIndex *IndexContainer, LyraIndex *IndexContainer, asset string, key string, callOrderbook *OrderbookData, putOrderbook *OrderbookData, expiry string, strike float64) {
+func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putOrderbook *OrderbookData, expiry string, strike float64) {
 	ArbContainer.Mu.Lock()
 	defer ArbContainer.Mu.Unlock()
 
@@ -133,8 +94,8 @@ func updateArbTable(ArbContainer *ArbTablesContainer, AevoIndex *IndexContainer,
 	}
 }
 
-func UpdateArbTables(ArbContainer *ArbTablesContainer, Orderbooks *map[string]*OrderbookData, AevoIndex *IndexContainer, LyraIndex *IndexContainer, asset string) {
-	for key, orderbook := range *Orderbooks {
+func updateArbTables(asset string) {
+	for key, orderbook := range Orderbooks {
 
 		components := strings.Split(key, "-")
 		expiry := components[1]
@@ -158,12 +119,12 @@ func UpdateArbTables(ArbContainer *ArbTablesContainer, Orderbooks *map[string]*O
 			continue
 		}
 
-		orderbook2, exists := (*Orderbooks)[key2]
+		orderbook2, exists := Orderbooks[key2]
 		if !exists {
 			continue
 		}
 
-		updateArbTable(ArbContainer, AevoIndex, LyraIndex, asset, keyTrim, orderbook, orderbook2, expiry, strike)
+		updateArbTable(asset, keyTrim, orderbook, orderbook2, expiry, strike)
 
 	}
 }

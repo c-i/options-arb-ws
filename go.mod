@@ -1,4 +1,4 @@
-module options-wss
+module wss-test
 
 go 1.22.2
 
