@@ -15,6 +15,36 @@ import (
 	"nhooyr.io/websocket"
 )
 
+type Greeks struct {
+	Delta float64 `json:"delta,string"`
+	Theta float64 `json:"theta,string"`
+	Gamma float64 `json:"gamma,string"`
+	Rho   float64 `json:"rho,string"`
+	Vega  float64 `json:"vega,string"`
+	Iv    float64 `json:"iv,string"`
+}
+
+type Market struct {
+	InstrumentId     int64   `json:"instrument_id,string"`
+	InstrumentName   string  `json:"instrument_name"`
+	InstrumentType   string  `json:"instrument_type"`
+	UnderlyingAsset  string  `json:"underlying_asset"`
+	QuoteAsset       string  `json:"quote_asset"`
+	PriceStep        float64 `json:"price_step,string"`
+	AmountStep       float64 `json:"amount_step,string"`
+	MinOrderValue    float64 `json:"min_order_value,string"`
+	MaxOrderValue    float64 `json:"max_order_value,string"`
+	MaxNotionalValue float64 `json:"max_notional_value,string"`
+	MarkPrice        float64 `json:"mark_price,string"`
+	ForwardPrice     float64 `json:"forward_price,string"`
+	IndexPrice       float64 `json:"index_price,string"`
+	IsActive         bool    `json:"is_active"`
+	OptionType       string  `json:"option_type"`
+	Expiry           int64   `json:"expiry,string"`
+	Strike           int64   `json:"strike,string"`
+	Greeks           Greeks  `json:"greeks"`
+}
+
 func aevoMarkets(asset string) []Market {
 	url := AevoHttp + "/markets?asset=" + asset + "&instrument_type=OPTION"
 
@@ -145,7 +175,7 @@ func aevoUpdateOrderbooks(res map[string]interface{}) {
 		return
 	}
 
-	if len(bidsRaw) <= 0 && len(asksRaw) <= 0 {
+	if len(bidsRaw) <= 0 && len(asksRaw) <= 0 { //if instrument has no bids/asks its useless and discarded
 		return
 	}
 
@@ -179,7 +209,7 @@ func aevoUpdateOrderbooks(res map[string]interface{}) {
 	}
 
 	sort.Slice(Orderbooks[instrument].Bids, func(i, j int) bool {
-		return Orderbooks[instrument].Bids[i].Price < Orderbooks[instrument].Bids[j].Price
+		return Orderbooks[instrument].Bids[i].Price > Orderbooks[instrument].Bids[j].Price
 	})
 	sort.Slice(Orderbooks[instrument].Asks, func(i, j int) bool {
 		return Orderbooks[instrument].Asks[i].Price < Orderbooks[instrument].Asks[j].Price
@@ -226,7 +256,10 @@ func aevoUpdateIndex(res map[string]interface{}) {
 		return
 	}
 
-	AevoIndex.Index[asset] = price
+	if price > 0 {
+		AevoIndex.Index[asset] = price
+	}
+
 	// fmt.Printf("index: %+v\n\n", Index)
 }
 
@@ -256,7 +289,6 @@ func aevoWssRead(ctx context.Context, c *websocket.Conn) { //add exit condition,
 
 	if strings.Contains(channel, "index") {
 		aevoUpdateIndex(res)
-		updateArbTables("ETH")
 	}
 }
 

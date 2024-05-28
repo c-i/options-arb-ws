@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -196,6 +197,12 @@ func lyraUpdateOrderbooks(data map[string]interface{}) {
 		}
 	}
 
+	sort.Slice(Orderbooks[instrument].Bids, func(i, j int) bool {
+		return Orderbooks[instrument].Bids[i].Price > Orderbooks[instrument].Bids[j].Price
+	})
+	sort.Slice(Orderbooks[instrument].Asks, func(i, j int) bool {
+		return Orderbooks[instrument].Asks[i].Price < Orderbooks[instrument].Asks[j].Price
+	})
 	// fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
 }
 
@@ -212,17 +219,21 @@ func lyraUpdateIndex(data map[string]interface{}) {
 	var feed map[string]interface{}
 	for key, value := range feeds {
 		feed, ok = value.(map[string]interface{})
-		price, ok2 := feed["price"].(string)
+		priceStr, ok2 := feed["price"].(string)
 		if !ok || !ok2 {
 			log.Printf("lyraUpdateIndex: unable to convert value to map[string]interface{} or feed['price'] to float64:\n value, type: %+v, %+v\n feed['price']: %+v, %+v\n\n", value, reflect.TypeOf(value), feed["price"], reflect.TypeOf(feed["price"]))
 			continue
 		}
 
-		var err error
-		LyraIndex.Index[key], err = strconv.ParseFloat(price, 64)
+		price, err := strconv.ParseFloat(priceStr, 64)
 		if err != nil {
 			log.Printf("lyraUpdateIndex: strconvParseFloat error: %v\n\n", err)
 		}
+
+		if price > 0 { //flawed check
+			LyraIndex.Index[key] = price
+		}
+
 	}
 }
 
@@ -259,7 +270,7 @@ func lyraWssRead(ctx context.Context, c *websocket.Conn) {
 	}
 	if strings.Contains(channel, "spot_feed") {
 		lyraUpdateIndex(data)
-		updateArbTables("ETH")
+
 		// fmt.Printf("Lyra index: %v\n\n", LyraIndex["ETH"])
 	}
 

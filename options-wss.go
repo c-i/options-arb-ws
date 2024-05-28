@@ -32,36 +32,6 @@ type wssData struct {
 	Data []string `json:"data"`
 }
 
-type Greeks struct {
-	Delta float64 `json:"delta,string"`
-	Theta float64 `json:"theta,string"`
-	Gamma float64 `json:"gamma,string"`
-	Rho   float64 `json:"rho,string"`
-	Vega  float64 `json:"vega,string"`
-	Iv    float64 `json:"iv,string"`
-}
-
-type Market struct {
-	InstrumentId     int64   `json:"instrument_id,string"`
-	InstrumentName   string  `json:"instrument_name"`
-	InstrumentType   string  `json:"instrument_type"`
-	UnderlyingAsset  string  `json:"underlying_asset"`
-	QuoteAsset       string  `json:"quote_asset"`
-	PriceStep        float64 `json:"price_step,string"`
-	AmountStep       float64 `json:"amount_step,string"`
-	MinOrderValue    float64 `json:"min_order_value,string"`
-	MaxOrderValue    float64 `json:"max_order_value,string"`
-	MaxNotionalValue float64 `json:"max_notional_value,string"`
-	MarkPrice        float64 `json:"mark_price,string"`
-	ForwardPrice     float64 `json:"forward_price,string"`
-	IndexPrice       float64 `json:"index_price,string"`
-	IsActive         bool    `json:"is_active"`
-	OptionType       string  `json:"option_type"`
-	Expiry           int64   `json:"expiry,string"`
-	Strike           int64   `json:"strike,string"`
-	Greeks           Greeks  `json:"greeks"`
-}
-
 type Order struct {
 	Price    float64
 	Amount   float64
@@ -100,7 +70,8 @@ type IndexContainer struct {
 	Index map[string]float64
 }
 
-var Orderbooks = make(map[string]*OrderbookData) //pointer seems like a bad idea but makes assignment of elements easier
+// pointer seems like a bad idea but makes assignment of elements easier
+var Orderbooks = make(map[string]*OrderbookData) //key: e.g. "ETH-02JAN06-3000-C"
 var ArbContainer = ArbTablesContainer{ArbTables: make(map[string]*ArbTable)}
 var AevoIndex = IndexContainer{Index: make(map[string]float64)}
 var LyraIndex = IndexContainer{Index: make(map[string]float64)}
@@ -202,6 +173,7 @@ func mainEventLoop(connections map[string]connData) {
 		// start := time.Now()
 		aevoWssRead(connections["aevo"].Ctx, connections["aevo"].Conn)
 		lyraWssRead(connections["lyra"].Ctx, connections["lyra"].Conn)
+		updateArbTables("ETH")
 		// duration := time.Since(start)
 		// if duration > maxTime && duration < time.Second*2 {
 		// 	maxTime = duration

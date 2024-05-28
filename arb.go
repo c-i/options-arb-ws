@@ -26,6 +26,10 @@ func findApy(expiry string, relProfit float64) float64 {
 
 func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putOrderbook *OrderbookData, expiry string, strike float64) {
 	ArbContainer.Mu.Lock()
+	LyraIndex.Mu.Lock()
+	AevoIndex.Mu.Lock()
+	defer LyraIndex.Mu.Unlock()
+	defer AevoIndex.Mu.Unlock()
 	defer ArbContainer.Mu.Unlock()
 
 	//  abs((index + put) - (strike + call))
@@ -39,12 +43,16 @@ func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putO
 
 		index = AevoIndex.Index[asset]
 
-		_, exists := LyraIndex.Index["ETH"]
+		_, exists := LyraIndex.Index[asset]
 		if putOrderbook.Asks[0].Exchange == "lyra" && exists {
 			index = LyraIndex.Index[asset]
 		}
 
-		absProfit = math.Abs((index + putAsk) - (strike + callBid))
+		if index <= 0 { //not a good solution, but checking UpdateIndex doesnt work for some reason, maybe add Index variable to orderbooks struct and use that instead of global index
+			return
+		}
+
+		absProfit = math.Abs((index + putAsk) - (strike + callBid)) //broken when index is near 0
 		relProfit := absProfit / (index + putAsk + callBid) * 100
 		apy := findApy(expiry, relProfit)
 
