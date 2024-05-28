@@ -1,4 +1,4 @@
-module options-wss
+module options-ws
 
 go 1.22.2
 
