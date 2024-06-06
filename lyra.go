@@ -185,23 +185,26 @@ func lyraUpdateOrderbooks(data map[string]interface{}) {
 	_, exists := Orderbooks[instrument]
 
 	if exists {
-
-		Orderbooks[instrument].Bids = append(Orderbooks[instrument].Bids, bids...)
-		Orderbooks[instrument].Asks = append(Orderbooks[instrument].Asks, asks...)
+		Orderbooks[instrument].Bids["lyra"] = bids
+		Orderbooks[instrument].Asks["lyra"] = asks
 		Orderbooks[instrument].LastUpdated = timestamp
 	} else {
-		Orderbooks[instrument] = &OrderbookData{
-			Bids:        bids,
-			Asks:        asks,
-			LastUpdated: timestamp,
-		}
+		Orderbooks[instrument] = &OrderbookData{}
+		Orderbooks[instrument].Bids = make(map[string][]Order)
+		Orderbooks[instrument].Asks = make(map[string][]Order)
+		// Orderbooks[instrument].Bids["lyra"] = make([]Order, 0)
+		// Orderbooks[instrument].Asks["lyra"] = make([]Order, 0)
+
+		Orderbooks[instrument].Bids["lyra"] = bids
+		Orderbooks[instrument].Asks["lyra"] = asks
+		Orderbooks[instrument].LastUpdated = timestamp
 	}
 
-	sort.Slice(Orderbooks[instrument].Bids, func(i, j int) bool {
-		return Orderbooks[instrument].Bids[i].Price > Orderbooks[instrument].Bids[j].Price
+	sort.Slice(Orderbooks[instrument].Bids["lyra"], func(i, j int) bool {
+		return Orderbooks[instrument].Bids["lyra"][i].Price > Orderbooks[instrument].Bids["lyra"][j].Price
 	})
-	sort.Slice(Orderbooks[instrument].Asks, func(i, j int) bool {
-		return Orderbooks[instrument].Asks[i].Price < Orderbooks[instrument].Asks[j].Price
+	sort.Slice(Orderbooks[instrument].Asks["lyra"], func(i, j int) bool {
+		return Orderbooks[instrument].Asks["lyra"][i].Price < Orderbooks[instrument].Asks["lyra"][j].Price
 	})
 	// fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])
 }

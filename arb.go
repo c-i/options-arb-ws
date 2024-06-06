@@ -24,7 +24,7 @@ func findApy(expiry string, relProfit float64) float64 {
 	return apy
 }
 
-func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putOrderbook *OrderbookData, expiry string, strike float64) {
+func updateArbTable(asset string, key string, callBids []Order, callAsks []Order, putBids []Order, putAsks []Order, expiry string, strike float64) {
 	ArbContainer.Mu.Lock()
 	LyraIndex.Mu.Lock()
 	AevoIndex.Mu.Lock()
@@ -37,14 +37,14 @@ func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putO
 	var callBid float64
 	var putAsk float64
 	var index float64
-	if len(callOrderbook.Bids) > 0 && len(putOrderbook.Asks) > 0 {
-		callBid = callOrderbook.Bids[0].Price
-		putAsk = putOrderbook.Asks[0].Price
+	if len(callBids) > 0 && len(putAsks) > 0 {
+		callBid = callBids[0].Price
+		putAsk = putAsks[0].Price
 
 		index = AevoIndex.Index[asset]
 
 		_, exists := LyraIndex.Index[asset]
-		if putOrderbook.Asks[0].Exchange == "lyra" && exists {
+		if putAsks[0].Exchange == "lyra" && exists {
 			index = LyraIndex.Index[asset]
 		}
 
@@ -61,12 +61,12 @@ func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putO
 				Asset:       asset,
 				Expiry:      expiry,
 				Strike:      strike,
-				Bids:        callOrderbook.Bids,
-				Asks:        putOrderbook.Asks,
+				Bids:        callBids,
+				Asks:        putAsks,
 				BidType:     "C",
 				AskType:     "P",
-				BidExchange: callOrderbook.Bids[0].Exchange,
-				AskExchange: putOrderbook.Asks[0].Exchange,
+				BidExchange: callBids[0].Exchange,
+				AskExchange: putAsks[0].Exchange,
 				AbsProfit:   absProfit,
 				RelProfit:   relProfit,
 				Apy:         apy,
@@ -76,9 +76,9 @@ func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putO
 
 	var callAsk float64
 	var putBid float64
-	if len(callOrderbook.Asks) > 0 && len(putOrderbook.Bids) > 0 {
-		callAsk = callOrderbook.Asks[0].Price
-		putBid = putOrderbook.Bids[0].Price
+	if len(callAsks) > 0 && len(putBids) > 0 {
+		callAsk = callAsks[0].Price
+		putBid = putBids[0].Price
 		thisProfit := math.Abs((index + putBid) - (strike + callAsk))
 		relProfit := thisProfit / (index + callAsk + putBid) * 100
 		apy := findApy(expiry, relProfit)
@@ -88,18 +88,89 @@ func updateArbTable(asset string, key string, callOrderbook *OrderbookData, putO
 				Asset:       asset,
 				Expiry:      expiry,
 				Strike:      strike,
-				Bids:        putOrderbook.Bids,
-				Asks:        callOrderbook.Asks,
+				Bids:        putBids,
+				Asks:        callAsks,
 				BidType:     "P",
 				AskType:     "C",
-				BidExchange: putOrderbook.Bids[0].Exchange,
-				AskExchange: callOrderbook.Asks[0].Exchange,
+				BidExchange: putBids[0].Exchange,
+				AskExchange: callAsks[0].Exchange,
 				AbsProfit:   thisProfit,
 				RelProfit:   relProfit,
 				Apy:         apy,
 			}
 		}
 	}
+}
+
+func findBestOrders(callOrderbook *OrderbookData, putOrderbook *OrderbookData) (callBids []Order, callAsks []Order, putBids []Order, putAsks []Order) {
+	callBidExists := false
+	callAskExists := false
+	putBidExists := false
+	putAskExists := false
+
+	bestCallBids := []Order{{Price: -1}}
+	bestPutAsks := []Order{{Price: 100000000}}
+	bestCallAsks := []Order{{Price: 100000000}}
+	bestPutBids := []Order{{Price: -1}}
+
+	for _, bid := range callOrderbook.Bids {
+		// remember to use correct comparison sign based on bid or ask (highest bid lowest ask)
+		if len(bid) > 0 { //need to check if each map entry is nonempty, Exists only stays false if all are empty
+			callBidExists = true
+		} else {
+			continue
+		}
+		if bid[0].Price > bestCallBids[0].Price {
+			bestCallBids = bid
+		}
+	}
+	if !callBidExists {
+		bestCallBids = []Order{}
+	}
+
+	for _, ask := range callOrderbook.Asks {
+		if len(ask) > 0 {
+			callAskExists = true
+		} else {
+			continue
+		}
+		if ask[0].Price < bestCallAsks[0].Price {
+			bestCallAsks = ask
+		}
+	}
+	if !callAskExists {
+		bestCallAsks = []Order{}
+	}
+
+	for _, bid := range putOrderbook.Bids {
+		if len(bid) > 0 {
+			putBidExists = true
+		} else {
+			continue
+		}
+		if bid[0].Price > bestPutBids[0].Price {
+			bestPutBids = bid
+		}
+	}
+	if !putBidExists {
+		bestPutBids = []Order{}
+	}
+
+	for _, ask := range putOrderbook.Asks {
+		if len(ask) > 0 {
+			putAskExists = true
+		} else {
+			continue
+		}
+		if ask[0].Price < bestPutAsks[0].Price {
+			bestPutAsks = ask
+		}
+	}
+	if !putAskExists {
+		bestPutAsks = []Order{}
+	}
+
+	return bestCallBids, bestCallAsks, bestPutBids, bestPutAsks
 }
 
 func updateArbTables(asset string) {
@@ -132,7 +203,10 @@ func updateArbTables(asset string) {
 			continue
 		}
 
-		updateArbTable(asset, keyTrim, orderbook, orderbook2, expiry, strike)
+		bestCallBids, bestCallAsks, bestPutBids, bestPutAsks := findBestOrders(orderbook, orderbook2)
+		// fmt.Printf("%v\n%v\n%v\n%v\n\n", bestCallBids, bestCallAsks, bestPutBids, bestPutAsks)
+
+		updateArbTable(asset, keyTrim, bestCallBids, bestCallAsks, bestPutBids, bestPutAsks, expiry, strike)
 
 	}
 }

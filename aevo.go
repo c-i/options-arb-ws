@@ -196,23 +196,26 @@ func aevoUpdateOrderbooks(res map[string]interface{}) {
 	_, exists := Orderbooks[instrument]
 
 	if exists {
-
-		Orderbooks[instrument].Bids = append(Orderbooks[instrument].Bids, bids...)
-		Orderbooks[instrument].Asks = append(Orderbooks[instrument].Asks, asks...)
+		Orderbooks[instrument].Bids["aevo"] = bids
+		Orderbooks[instrument].Asks["aevo"] = asks
 		Orderbooks[instrument].LastUpdated = lastUpdated
 	} else {
-		Orderbooks[instrument] = &OrderbookData{
-			Bids:        bids,
-			Asks:        asks,
-			LastUpdated: lastUpdated,
-		}
+		Orderbooks[instrument] = &OrderbookData{}
+		Orderbooks[instrument].Bids = make(map[string][]Order)
+		Orderbooks[instrument].Asks = make(map[string][]Order)
+		// Orderbooks[instrument].Bids["aevo"] = make([]Order, 0)
+		// Orderbooks[instrument].Asks["aevo"] = make([]Order, 0)
+
+		Orderbooks[instrument].Bids["aevo"] = bids
+		Orderbooks[instrument].Asks["aevo"] = asks
+		Orderbooks[instrument].LastUpdated = lastUpdated
 	}
 
-	sort.Slice(Orderbooks[instrument].Bids, func(i, j int) bool {
-		return Orderbooks[instrument].Bids[i].Price > Orderbooks[instrument].Bids[j].Price
+	sort.Slice(Orderbooks[instrument].Bids["aevo"], func(i, j int) bool {
+		return Orderbooks[instrument].Bids["aevo"][i].Price > Orderbooks[instrument].Bids["aevo"][j].Price
 	})
-	sort.Slice(Orderbooks[instrument].Asks, func(i, j int) bool {
-		return Orderbooks[instrument].Asks[i].Price < Orderbooks[instrument].Asks[j].Price
+	sort.Slice(Orderbooks[instrument].Asks["aevo"], func(i, j int) bool {
+		return Orderbooks[instrument].Asks["aevo"][i].Price < Orderbooks[instrument].Asks["aevo"][j].Price
 	})
 
 	// fmt.Printf("%v: %+v\n\n", instrument, Orderbooks[instrument])

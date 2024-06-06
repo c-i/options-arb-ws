@@ -40,8 +40,8 @@ type Order struct {
 }
 
 type OrderbookData struct {
-	Bids        []Order
-	Asks        []Order
+	Bids        map[string][]Order
+	Asks        map[string][]Order
 	LastUpdated float64
 }
 
@@ -191,7 +191,7 @@ func arbTableHandler(w http.ResponseWriter, r *http.Request) {
 	ArbContainer.Mu.Lock()
 	defer ArbContainer.Mu.Unlock()
 
-	arbTablesSlice := make([]*ArbTable, len(ArbContainer.ArbTables))
+	arbTablesSlice := make([]*ArbTable, len(ArbContainer.ArbTables)) //converting to slice to sort by apy
 	i := 0
 	for _, table := range ArbContainer.ArbTables {
 		arbTablesSlice[i] = table
